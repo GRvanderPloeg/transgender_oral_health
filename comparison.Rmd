@@ -1,0 +1,241 @@
+---
+title: "comparisonBernd"
+author: "G.R. van der Ploeg"
+date: "2024-05-03"
+output: html_document
+---
+
+```{r setup, echo=FALSE, include=FALSE, warning=FALSE}
+library(tidyverse)
+library(biomformat)
+library(ggpubr)
+library(vegan)
+library(ape)
+library(stringr)
+```
+
+```{r load data, echo=FALSE, warning=FALSE}
+# Original dataset
+df = read_biom("./Data/GOH TRANS Roel/GOH TRANS Roel/Miseq/UNOISE_all_incl_pos_ctrl/GoHT_all_zotu_table_sorted.biom")
+
+# New: separate analysis of tongue
+df2 = read_biom("./Data/GoHTrans_rerun_Bernd/UNOISE_TP_ctrls/GoHT_TP_zotu_table_sorted.biom")
+
+# New: separate analysis of saliva
+df3 = read_biom("./Data/GoHTrans_rerun_Bernd/UNOISE_US_ctrls/GoHT_US_zotu_table_sorted.biom")
+
+# Count data extraction
+countsOriginal = biom_data(df) %>% as.matrix() %>% t() %>% as_tibble()
+countsTongue = biom_data(df2) %>% as.matrix() %>% t() %>% as_tibble()
+countsSaliva = biom_data(df3) %>% as.matrix() %>% t() %>% as_tibble()
+
+# Taxonomy extraction
+taxaOriginal = cbind(rownames(df), observation_metadata(df)) %>% as_tibble()
+taxaTongue = cbind(rownames(df2), observation_metadata(df2)) %>% as_tibble()
+taxaSaliva = cbind(rownames(df3), observation_metadata(df3)) %>% as_tibble()
+colnames(taxaOriginal) = c("zOTU", "Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species")
+colnames(taxaTongue) = c("zOTU", "Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species")
+colnames(taxaSaliva) = c("zOTU", "Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species")
+
+# Sample metadata extraction
+mapping = read.csv("./Data/GOH TRANS Roel/GOH TRANS Roel/Miseq/mapping_file_GOHTRANS_20240116.txt", sep="\t") %>% as_tibble()
+sampleNamesOriginal = biom_data(df) %>% as.matrix() %>% colnames()
+sampleNamesTongue = biom_data(df2) %>% as.matrix() %>% colnames()
+sampleNamesSaliva = biom_data(df3) %>% as.matrix() %>% colnames()
+
+sampleInfoOriginal = sampleNamesOriginal %>% as.tibble() %>% left_join(mapping, by=c("value"="X.SampleID"))
+sampleInfoTongue = sampleNamesTongue %>% as.tibble() %>% left_join(mapping, by=c("value"="X.SampleID"))
+sampleInfoSaliva = sampleNamesSaliva %>% as.tibble() %>% left_join(mapping, by=c("value"="X.SampleID"))
+
+# Extra metadata that I'm currently not using
+temp = read.csv("./Data/GOH-TRANS_csv_export_20240205114955/GOH-TRANS_export_20240205.csv", sep=";") %>% as_tibble()
+
+# Remove controls
+countsOriginal = countsOriginal[33:nrow(countsOriginal),]
+countsTongue = countsTongue[17:nrow(countsTongue),]
+countsSaliva = countsSaliva[9:nrow(countsSaliva),]
+
+sampleInfoOriginal = sampleInfoOriginal[33:nrow(sampleInfoOriginal),]
+sampleInfoTongue = sampleInfoTongue[17:nrow(sampleInfoTongue),]
+sampleInfoSaliva = sampleInfoSaliva[9:nrow(sampleInfoSaliva),]
+
+# Repair subject names
+sampleInfoOriginal$subject = str_split_fixed(sampleInfoOriginal$value, "\\.", 3)[,2]
+sampleInfoTongue$subject = str_split_fixed(sampleInfoTongue$value, "\\.", 3)[,2]
+sampleInfoSaliva$subject = str_split_fixed(sampleInfoSaliva$value, "\\.", 3)[,2]
+
+# Repair timepoints
+sampleInfoOriginal = sampleInfoOriginal %>% mutate(newTimepoint = 0)
+sampleInfoOriginal[sampleInfoOriginal$Timepoint == "Baseline_V1", "newTimepoint"] = 0
+sampleInfoOriginal[sampleInfoOriginal$Timepoint == "3_months_V2", "newTimepoint"] = 3
+sampleInfoOriginal[sampleInfoOriginal$Timepoint == "6_months_V3", "newTimepoint"] = 6
+sampleInfoOriginal[sampleInfoOriginal$Timepoint == "9_months_V3", "newTimepoint"] = 9
+sampleInfoOriginal[sampleInfoOriginal$Timepoint == "1_year_V4", "newTimepoint"] = 12
+
+sampleInfoTongue = sampleInfoTongue %>% mutate(newTimepoint = 0)
+sampleInfoTongue[sampleInfoTongue$Timepoint == "Baseline_V1", "newTimepoint"] = 0
+sampleInfoTongue[sampleInfoTongue$Timepoint == "3_months_V2", "newTimepoint"] = 3
+sampleInfoTongue[sampleInfoTongue$Timepoint == "6_months_V3", "newTimepoint"] = 6
+sampleInfoTongue[sampleInfoTongue$Timepoint == "9_months_V3", "newTimepoint"] = 9
+sampleInfoTongue[sampleInfoTongue$Timepoint == "1_year_V4", "newTimepoint"] = 12
+
+sampleInfoSaliva = sampleInfoSaliva %>% mutate(newTimepoint = 0)
+sampleInfoSaliva[sampleInfoSaliva$Timepoint == "Baseline_V1", "newTimepoint"] = 0
+sampleInfoSaliva[sampleInfoSaliva$Timepoint == "3_months_V2", "newTimepoint"] = 3
+sampleInfoSaliva[sampleInfoSaliva$Timepoint == "6_months_V3", "newTimepoint"] = 6
+sampleInfoSaliva[sampleInfoSaliva$Timepoint == "9_months_V3", "newTimepoint"] = 9
+sampleInfoSaliva[sampleInfoSaliva$Timepoint == "1_year_V4", "newTimepoint"] = 12
+
+# Add hormone levels to tongue data
+ylabs = c("Total_protein_ug_ml", "S_IgA_ug_ml", "MUC_5_B_ug_ml", "Amylase_U_ml", "Lysozyme_U_ml", "Chitinase_AU_ml", "Estradiol_pmol_ml", "LH_U_L", "SHBG_nmol_L", "Testosterone_nmol_L", "Free_testosterone_Vermeulen_pmol_L")
+hormoneInfo = sampleInfoOriginal %>% filter(Niche == "Saliva") %>% select(-Niche) %>% select(c(subject, newTimepoint, ylabs))
+sampleInfo = sampleInfoOriginal %>% select(-all_of(ylabs)) %>% left_join(hormoneInfo)
+
+# Split datasets
+tongue = countsOriginal[sampleInfoOriginal$Niche == "Tongue",]
+tongueSampleMeta = sampleInfoOriginal[sampleInfoOriginal$Niche == "Tongue",]
+saliva = countsOriginal[sampleInfoOriginal$Niche == "Saliva",]
+salivaSampleMeta = sampleInfoOriginal[sampleInfoOriginal$Niche == "Saliva",]
+```
+
+```{r compare counts}
+sum(tongue)
+sum(countsTongue)
+
+sum(saliva)
+sum(countsSaliva)
+
+# Total sum
+a = rowSums(tongue) %>% as_tibble() %>% ggplot(aes(x=value)) + geom_histogram() + ggtitle("Tongue - original")
+b = rowSums(countsTongue) %>% as_tibble() %>% ggplot(aes(x=value)) + geom_histogram() + ggtitle("Tongue - new")
+c = rowSums(saliva) %>% as_tibble() %>% ggplot(aes(x=value)) + geom_histogram() + ggtitle("Saliva - original")
+d = rowSums(countsSaliva) %>% as_tibble() %>% ggplot(aes(x=value)) + geom_histogram() + ggtitle("Saliva - new")
+plot = ggarrange(a,b,c,d)
+annotate_figure(plot, top = text_grob("Total sum", face = "bold", size = 14))
+
+# ColSums
+a2 = colSums(tongue) %>% as_tibble() %>% ggplot(aes(x=value)) + geom_histogram() + ggtitle("Tongue - original")
+b2 = colSums(countsTongue) %>% as_tibble() %>% ggplot(aes(x=value)) + geom_histogram() + ggtitle("Tongue - new")
+c2 = colSums(saliva) %>% as_tibble() %>% ggplot(aes(x=value)) + geom_histogram() + ggtitle("Saliva - original")
+d2 = colSums(countsSaliva) %>% as_tibble() %>% ggplot(aes(x=value)) + geom_histogram() + ggtitle("Saliva - new")
+plot4 = ggarrange(a2,b2,c2,d2)
+annotate_figure(plot4, top = text_grob("Column sum", face = "bold", size = 14))
+
+# Sparsity per feature
+e = (colSums(tongue==0) / nrow(tongue)) %>% as_tibble() %>% ggplot(aes(x=value)) + geom_histogram() + ggtitle("Tongue - original")
+f = (colSums(countsTongue==0) / nrow(countsTongue)) %>% as_tibble() %>% ggplot(aes(x=value)) + geom_histogram() + ggtitle("Tongue - new")
+g = (colSums(saliva==0) / nrow(saliva)) %>% as_tibble() %>% ggplot(aes(x=value)) + geom_histogram() + ggtitle("Saliva - original")
+h = (colSums(countsSaliva==0) / nrow(countsSaliva)) %>% as_tibble() %>% ggplot(aes(x=value)) + geom_histogram() + ggtitle("Saliva - new")
+plot2 = ggarrange(e,f,g,h)
+annotate_figure(plot2, top = text_grob("Sparsity per feature", face = "bold", size = 14))
+
+# Sparsity per sample
+i = (rowSums(tongue==0) / ncol(tongue)) %>% as_tibble() %>% ggplot(aes(x=value)) + geom_histogram() + ggtitle("Tongue - original")
+j = (rowSums(countsTongue==0) / ncol(countsTongue)) %>% as_tibble() %>% ggplot(aes(x=value)) + geom_histogram() + ggtitle("Tongue - new")
+k = (rowSums(saliva==0) / ncol(saliva)) %>% as_tibble() %>% ggplot(aes(x=value)) + geom_histogram() + ggtitle("Saliva - original")
+l = (rowSums(countsSaliva==0) / ncol(countsSaliva)) %>% as_tibble() %>% ggplot(aes(x=value)) + geom_histogram() + ggtitle("Saliva - new")
+plot3 = ggarrange(i,j,k,l)
+annotate_figure(plot3, top = text_grob("Sparsity per sample", face = "bold", size = 14))
+```
+
+```{r compare richness and evenness}
+r_tongue_original = specnumber(tongue)
+r_tongue_new = specnumber(countsTongue)
+r_saliva_original = specnumber(saliva)
+r_saliva_new = specnumber(countsSaliva)
+
+a = cbind(r_tongue_original, tongueSampleMeta) %>% as_tibble() %>% ggplot(aes(x=as.factor(newTimepoint),y=r_tongue_original,fill=as.factor(GenderID))) + geom_boxplot() + ggtitle("Tongue - original") + ylim(0,500)
+b = cbind(r_tongue_new, sampleInfoTongue) %>% as_tibble() %>% ggplot(aes(x=as.factor(newTimepoint),y=r_tongue_new,fill=as.factor(GenderID))) + geom_boxplot() + ggtitle("Tongue - new") + ylim(0,500)
+c = cbind(r_saliva_original, salivaSampleMeta) %>% as_tibble() %>% ggplot(aes(x=as.factor(newTimepoint),y=r_saliva_original,fill=as.factor(GenderID))) + geom_boxplot() + ggtitle("Saliva - original") + ylim(0,500)
+d = cbind(r_saliva_new, sampleInfoSaliva) %>% as_tibble() %>% ggplot(aes(x=as.factor(newTimepoint),y=r_saliva_new,fill=as.factor(GenderID))) + geom_boxplot() + ggtitle("Saliva - new") + ylim(0,500)
+plot1 = ggarrange(a,b,c,d,common.legend=TRUE)
+annotate_figure(plot1, top = text_grob("Number of species", face = "bold", size = 14))
+```
+
+```{r filter features based on sparsity}
+tongueTM = tongue[tongueSampleMeta$GenderID == "TM",]
+tongueTW = tongue[tongueSampleMeta$GenderID == "TW",]
+tongueTM_new = countsTongue[sampleInfoTongue$GenderID == "TM",]
+tongueTW_new = countsTongue[sampleInfoTongue$GenderID == "TW",]
+
+salivaTM = saliva[salivaSampleMeta$GenderID == "TM",]
+salivaTW = saliva[salivaSampleMeta$GenderID == "TW",]
+salivaTM_new = countsSaliva[sampleInfoSaliva$GenderID == "TM",]
+salivaTW_new = countsSaliva[sampleInfoSaliva$GenderID == "TW",]
+
+tongueTMsparsity = colSums(tongueTM==0) / nrow(tongueTM)
+tongueTWsparsity = colSums(tongueTW==0) / nrow(tongueTW)
+tongueTMsparsity_new = colSums(tongueTM_new==0) / nrow(tongueTM_new)
+tongueTWsparsity_new = colSums(tongueTW_new==0) / nrow(tongueTW_new)
+
+tongueThreshold = 0.99
+tongueSelection = (tongueTMsparsity <= tongueThreshold) & (tongueTWsparsity <= tongueThreshold)
+tongueSelection_new = (tongueTMsparsity_new <= tongueThreshold) & (tongueTWsparsity_new <= tongueThreshold)
+
+salivaTMsparsity = colSums(salivaTM==0) / nrow(salivaTM)
+salivaTWsparsity = colSums(salivaTW==0) / nrow(salivaTW)
+salivaTMsparsity_new = colSums(salivaTM_new==0) / nrow(salivaTM_new)
+salivaTWsparsity_new = colSums(salivaTW_new==0) / nrow(salivaTW_new)
+
+salivaThreshold = 0.99
+salivaSelection = (salivaTMsparsity <= salivaThreshold) & (salivaTWsparsity <= salivaThreshold)
+salivaSelection_new = (salivaTMsparsity_new <= salivaThreshold) & (salivaTWsparsity_new <= salivaThreshold)
+```
+
+```{r filter samples based on total sum}
+# Sample selection based on total counts
+tongue_threshold = 5000
+saliva_threshold = 5000
+
+tongueSampleSelection = rowSums(tongue) >= tongue_threshold
+tongueSampleSelection_new = rowSums(countsTongue) >= tongue_threshold
+salivaSampleSelection = rowSums(saliva) >= saliva_threshold
+salivaSampleSelection_new = rowSums(countsSaliva) >= saliva_threshold
+```
+
+```{r subset the data accordingly}
+# Do sample selection immediately as it will not affect CLR
+tongue_subset = tongue[tongueSampleSelection,tongueSelection]
+tongueSampleMeta_subset = tongueSampleMeta[tongueSampleSelection,]
+countsTongue_subset = countsTongue[tongueSampleSelection_new,tongueSelection_new]
+sampleInfoTongue_subset = sampleInfoTongue[tongueSampleSelection_new,]
+
+saliva_subset = saliva[salivaSampleSelection,salivaSelection]
+salivaSampleMeta_subset = salivaSampleMeta[salivaSampleSelection,]
+countsSaliva_subset = countsSaliva[salivaSampleSelection_new,salivaSelection_new]
+sampleInfoSaliva_subset = sampleInfoSaliva[salivaSampleSelection_new,]
+```
+
+```{r PCoA tongue}
+a = pcoa(vegdist(tongue_subset+1, method="aitchison"))$vectors %>% as_tibble() %>% mutate(timepoint = tongueSampleMeta_subset$newTimepoint, genderID = tongueSampleMeta_subset$GenderID) %>% ggplot(aes(x=Axis.1, y=Axis.2, col=as.factor(genderID))) + geom_point() + ggtitle("Tongue - original")
+b = pcoa(vegdist(countsTongue_subset+1, method="aitchison"))$vectors %>% as_tibble() %>% mutate(timepoint = sampleInfoTongue_subset$newTimepoint, genderID = sampleInfoTongue_subset$GenderID) %>% ggplot(aes(x=Axis.1, y=Axis.2, col=as.factor(genderID))) + geom_point() + ggtitle("Tongue - new")
+c = pcoa(vegdist(saliva_subset+1, method="aitchison"))$vectors %>% as_tibble() %>% mutate(timepoint = salivaSampleMeta_subset$newTimepoint, genderID = salivaSampleMeta_subset$GenderID) %>% ggplot(aes(x=Axis.1, y=Axis.2, col=as.factor(genderID))) + geom_point() + ggtitle("Saliva - original")
+d = pcoa(vegdist(countsSaliva_subset+1, method="aitchison"))$vectors %>% as_tibble() %>% mutate(timepoint = sampleInfoSaliva_subset$newTimepoint, genderID = sampleInfoSaliva_subset$GenderID) %>% ggplot(aes(x=Axis.1, y=Axis.2, col=as.factor(genderID))) + geom_point() + ggtitle("Saliva - new")
+ggarrange(a,b,c,d,common.legend=TRUE)
+```
+
+```{r relAbs}
+# Tongue original
+relAbs_tongue = sweep(tongue, 1, rowSums(tongue), FUN="/")
+colnames(relAbs_tongue) = taxaOriginal$zOTU
+
+relAbs_tongue %>% mutate(GenderID = tongueSampleMeta$GenderID, Timepoint = tongueSampleMeta$newTimepoint) %>% pivot_longer(-c(GenderID,Timepoint)) %>% group_by(GenderID,Timepoint,name) %>% summarise(s = mean(value)) %>% left_join(taxaOriginal, by=c("name"="zOTU")) %>% ggplot(aes(x=as.factor(Timepoint),y=s,fill=as.factor(Phylum))) + facet_grid(vars(GenderID)) + geom_bar(stat="identity") + ggtitle("Tongue - original")
+
+# Tongue new
+relAbs_tongue_new = sweep(countsTongue, 1, rowSums(countsTongue), FUN="/")
+colnames(relAbs_tongue_new) = taxaTongue$zOTU
+
+relAbs_tongue_new %>% mutate(GenderID = sampleInfoTongue$GenderID, Timepoint = sampleInfoTongue$newTimepoint) %>% pivot_longer(-c(GenderID,Timepoint)) %>% group_by(GenderID,Timepoint,name) %>% summarise(s = mean(value)) %>% left_join(taxaTongue, by=c("name"="zOTU")) %>% ggplot(aes(x=as.factor(Timepoint),y=s,fill=as.factor(Phylum))) + facet_grid(vars(GenderID)) + geom_bar(stat="identity") + ggtitle("Tongue - new")
+
+# Saliva original
+relAbs_saliva = sweep(saliva, 1, rowSums(saliva), FUN="/")
+colnames(relAbs_saliva) = taxaOriginal$zOTU
+
+relAbs_saliva %>% mutate(GenderID = salivaSampleMeta$GenderID, Timepoint = salivaSampleMeta$newTimepoint) %>% pivot_longer(-c(GenderID,Timepoint)) %>% group_by(GenderID,Timepoint,name) %>% summarise(s = mean(value)) %>% left_join(taxaOriginal, by=c("name"="zOTU")) %>% ggplot(aes(x=as.factor(Timepoint),y=s,fill=as.factor(Phylum))) + facet_grid(vars(GenderID)) + geom_bar(stat="identity") + ggtitle("Saliva - original")
+
+# Saliva new
+relAbs_saliva_new = sweep(countsSaliva, 1, rowSums(countsSaliva), FUN="/")
+colnames(relAbs_saliva_new) = taxaSaliva$zOTU
+
+relAbs_saliva_new %>% mutate(GenderID = sampleInfoSaliva$GenderID, Timepoint = sampleInfoSaliva$newTimepoint) %>% pivot_longer(-c(GenderID,Timepoint)) %>% group_by(GenderID,Timepoint,name) %>% summarise(s = mean(value)) %>% left_join(taxaSaliva, by=c("name"="zOTU")) %>% ggplot(aes(x=as.factor(Timepoint),y=s,fill=as.factor(Phylum))) + facet_grid(vars(GenderID)) + geom_bar(stat="identity") + ggtitle("Saliva - new")
+```

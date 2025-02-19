@@ -1,0 +1,2279 @@
+---
+title: "allFiguresAndTables"
+output: html_document
+date: "2024-05-07"
+---
+
+```{r setup}
+library(tidyverse)
+library(ggplot2)
+library(ggpubr)
+library(scales)
+library(parafac4microbiome)
+library(ggrepel)
+library(PMCMRplus)
+```
+
+# Preamble
+
+```{r define colours}
+
+# Use the actual trans colors
+trans_cols = c("#35B2B8", "#861D84")
+
+phylum_cols = hue_pal()(9)[-c(6,9)]
+```
+
+```{r import data}
+tongueDF = read.csv("./Data/20240503_UNOISE_new/tongueCounts_fixed.csv", header=FALSE, sep=" ") %>% as_tibble()
+salivaDF = read.csv("./Data/20240503_UNOISE_new/salivaCounts_fixed.csv", header=FALSE, sep=" ") %>% as_tibble()
+tongueSampleMeta = read.csv("./Data/20240503_UNOISE_new/sampleInfoTongue_fixed.csv", sep=" ") %>% as_tibble()
+salivaSampleMeta = read.csv("./Data/20240503_UNOISE_new/sampleInfoSaliva_fixed.csv", sep=" ") %>% as_tibble()
+taxonomyTongue = read.csv("./Data/20240503_UNOISE_new/taxonomyTongue_fixed.csv", sep=" ") %>% as_tibble()
+taxonomySaliva = read.csv("./Data/20240503_UNOISE_new/taxonomySaliva_fixed.csv", sep=" ") %>% as_tibble()
+
+cytokineSampleMeta = read.csv("./Data/20241209_cytokines_sampleMeta.csv", header=FALSE, sep=" ") %>% as_tibble()
+colnames(cytokineSampleMeta) = c("Participant_code", "GenderID", "newTimepoint", "Testosterone", "Estradiol")
+cytokineFeatureMeta = read.csv("./Data/20241209_cytokines_featureMeta.csv", header=FALSE, sep=" ") %>% as_tibble()
+cytokineDF = read.csv("./Data/20241209_cytokines.csv", header=FALSE, sep=" ") %>% as_tibble()
+colnames(cytokineDF) = cytokineFeatureMeta$V1
+
+# Load other metadata and ph
+ph_BOMP = read_delim("Data/GOH-TRANS_csv_export_20240205114955/GOH-TRANS_export_20240205.csv", 
+    delim = ";", escape_double = FALSE, trim_ws = TRUE) %>% as_tibble()
+
+df1 = ph_BOMP %>% select(`Participant Id`, starts_with("5.")) %>% mutate(subject = 1:42, numTeeth = `5.1|Number of teeth`, DMFT = `5.2|DMFT`, numBleedingSites = `5.3|Bleeding sites`, boppercent = `5.4|BOP%`, DPSI = `5.5|DPSI`, pH = `5.8|pH`) %>% select(subject, numTeeth, DMFT, numBleedingSites, boppercent, DPSI, pH)
+df2 = ph_BOMP %>% select(`Participant Id`, starts_with("12.")) %>% mutate(subject = 1:42, numTeeth = `12.1|Number of teeth`, DMFT = `12.2|DMFT`, numBleedingSites = `12.3|Bleeding sites`, boppercent = `12.4|BOP%`, DPSI = `12.5|DPSI`, pH = `12.8|pH`) %>% select(subject, numTeeth, DMFT, numBleedingSites, boppercent, DPSI, pH)
+df3 = ph_BOMP %>% select(`Participant Id`, starts_with("19.")) %>% mutate(subject = 1:42, numTeeth = `19.1|Number of teeth`, DMFT = `19.2|DMFT`, numBleedingSites = `19.3|Bleeding sites`, boppercent = `19.4|BOP%`, DPSI = `19.5|DPSI`, pH = `19.8|pH`) %>% select(subject, numTeeth, DMFT, numBleedingSites, boppercent, DPSI, pH)
+df4 = ph_BOMP %>% select(`Participant Id`, starts_with("26.")) %>% mutate(subject = 1:42, numTeeth = `26.1|Number of teeth`, DMFT = `26.2|DMFT`, numBleedingSites = `26.3|Bleeding sites`, boppercent = `26.4|BOP%`, DPSI = `26.5|DPSI`, pH = `26.8|pH`) %>% select(subject, numTeeth, DMFT, numBleedingSites, boppercent, DPSI, pH)
+
+otherMeta = rbind(df1, df2, df3, df4) %>% as_tibble() %>% mutate(newTimepoint = rep(c(0,3,6,12), each=42))
+
+# Remove pH measurements of lower than 0
+otherMeta = otherMeta[!otherMeta$pH < 1,] %>% as_tibble()
+
+timepoints = c(0, 3, 6, 12)
+```
+
+```{r load NPLS models}
+importPARAFAC = function(path, prefix, mode="microbiome", numComponents=1){
+  obj = list()
+  obj$model = list()
+  
+  obj$model$A = read.csv(paste0(path,prefix,"_mode1.csv"), header=FALSE)
+  obj$model$B = read.csv(paste0(path,prefix,"_mode2.csv"), header=FALSE)
+  obj$model$C = read.csv(paste0(path,prefix,"_mode3.csv"), header=FALSE)
+  obj$reconstructedData = read.csv(paste0(path,prefix,"_model.csv"), header=FALSE)
+  obj$dataset$data = read.csv(paste0(path,prefix,"_input.csv"), header=FALSE)
+  obj$dataset$mode1 = as.matrix(obj$model$A[,(numComponents+1):ncol(obj$model$A)])
+  obj$dataset$mode2 = as.matrix(obj$model$B[,(numComponents+1):ncol(obj$model$B)])
+  obj$dataset$mode3 = as.matrix(obj$model$C[,(numComponents+1):ncol(obj$model$C)])
+  
+  colnames(obj$dataset$mode1) = c("subject", "GenderID")
+  colnames(obj$dataset$mode3) = c("newTimepoint")
+  
+  if(mode=="microbiome"){
+    colnames(obj$dataset$mode2) = c("num", "zOTU", "Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species")
+  }
+  return(obj)
+}
+
+# Tongue
+tongue_full = importPARAFAC("./20241212_Tongue_UNOISE_combined_binary/", "GOHTRANS_tongue")
+tongue_TM = importPARAFAC("./20241212_Tongue_UNOISE_TM_2comp/", "GOHTRANS_tongue", numComponents=2)
+tongue_TW = importPARAFAC("./20241212_Tongue_UNOISE_Tw_1comp/", "GOHTRANS_tongue")
+
+# Saliva
+saliva_full = importPARAFAC("./20241212_Saliva_UNOISE_combined_binary/", "GOHTRANS_saliva")
+saliva_TM = importPARAFAC("./20241212_Saliva_UNOISE_TM/", "GOHTRANS_saliva")
+saliva_TW = importPARAFAC("./20241212_Saliva_UNOISE_Tw/", "GOHTRANS_saliva")
+
+# Cytokines
+cytokines_full = importPARAFAC("./20241212_Cytokines_combined_binary/", "GOHTRANS_cytokine", mode="cytokine")
+cytokines_TM = importPARAFAC("./20241212_Cytokines_TM_1comp/", "GOHTRANS_cytokine", mode="cytokine")
+cytokines_TW = importPARAFAC("./20241212_Cytokines_Tw/", "GOHTRANS_cytokine", mode="cytokine")
+
+# Flip components where needed
+## Saliva TM
+# saliva_TM$model$A[,1] = -1 * saliva_TM$model$A[,1]
+# saliva_TM$model$B[,1] = -1 * saliva_TM$model$B[,1]
+```
+
+# Main text figures
+```{r figure 1 - study overview}
+friedmanPlusNemenyi = function(df, y, timepoints=c(0,3,12)){
+  mask1 = (!is.na(y))
+  mask2 = (df$newTimepoint %in% timepoints)
+  
+  df = df[mask1 & mask2,]
+  keepSubjects = table(df$subject)[table(df$subject) == length(timepoints)] %>% t() %>% colnames() %>% as.numeric()
+  mask3 = df$subject %in% keepSubjects
+  
+  df = df[mask3,]
+  newY = y[mask1 & mask2]
+  newY = newY[mask3]
+  
+  result0 = length(unique(df$subject))
+  result1 = friedman.test(newY, df$newTimepoint, df$subject)
+  result2 = frdAllPairsNemenyiTest(newY, df$newTimepoint, df$subject)
+  return(list(result0,result1, result2))
+  
+}
+
+# Blood based
+friedmanPlusNemenyi(salivaSampleMeta %>% filter(GenderID == "TM"), salivaSampleMeta %>% filter(GenderID == "TM") %>% select(Testosterone_nmol_L) %>% pull())
+friedmanPlusNemenyi(salivaSampleMeta %>% filter(GenderID == "TW"), salivaSampleMeta %>% filter(GenderID == "TW") %>% select(Testosterone_nmol_L) %>% pull())
+
+friedmanPlusNemenyi(salivaSampleMeta %>% filter(GenderID == "TM"), salivaSampleMeta %>% filter(GenderID == "TM") %>% select(Estradiol_pmol_ml) %>% pull())
+friedmanPlusNemenyi(salivaSampleMeta %>% filter(GenderID == "TW"), salivaSampleMeta %>% filter(GenderID == "TW") %>% select(Estradiol_pmol_ml) %>% pull())
+
+# Biochemical
+friedmanPlusNemenyi(salivaSampleMeta %>% filter(GenderID == "TM"), salivaSampleMeta %>% filter(GenderID == "TM") %>% select(MUC_5_B_ug_ml) %>% pull(), timepoints=c(0,3,6,12))
+friedmanPlusNemenyi(salivaSampleMeta %>% filter(GenderID == "TW"), salivaSampleMeta %>% filter(GenderID == "TW") %>% select(MUC_5_B_ug_ml) %>% pull(), timepoints=c(0,3,6,12))
+
+friedmanPlusNemenyi(salivaSampleMeta %>% filter(GenderID == "TM"), salivaSampleMeta %>% filter(GenderID == "TM") %>% select(Chitinase_AU_ml) %>% pull(), timepoints=c(0,3,6,12))
+friedmanPlusNemenyi(salivaSampleMeta %>% filter(GenderID == "TW"), salivaSampleMeta %>% filter(GenderID == "TW") %>% select(Chitinase_AU_ml) %>% pull(), timepoints=c(0,3,6,12))
+
+friedmanPlusNemenyi(salivaSampleMeta %>% filter(GenderID == "TM"), salivaSampleMeta %>% filter(GenderID == "TM") %>% select(S_IgA_ug_ml) %>% pull(), timepoints=c(0,3,6,12))
+friedmanPlusNemenyi(salivaSampleMeta %>% filter(GenderID == "TW"), salivaSampleMeta %>% filter(GenderID == "TW") %>% select(S_IgA_ug_ml) %>% pull(), timepoints=c(0,3,6,12))
+
+friedmanPlusNemenyi(salivaSampleMeta %>% filter(GenderID == "TM"), salivaSampleMeta %>% filter(GenderID == "TM") %>% select(Lysozyme_U_ml) %>% pull(), timepoints=c(0,3,6,12))
+friedmanPlusNemenyi(salivaSampleMeta %>% filter(GenderID == "TW"), salivaSampleMeta %>% filter(GenderID == "TW") %>% select(Lysozyme_U_ml) %>% pull(), timepoints=c(0,3,6,12))
+
+friedmanPlusNemenyi(salivaSampleMeta %>% filter(GenderID == "TM"), salivaSampleMeta %>% filter(GenderID == "TM") %>% select(Amylase_U_ml) %>% pull(), timepoints=c(0,3,6,12))
+friedmanPlusNemenyi(salivaSampleMeta %>% filter(GenderID == "TW"), salivaSampleMeta %>% filter(GenderID == "TW") %>% select(Amylase_U_ml) %>% pull(), timepoints=c(0,3,6,12))
+
+friedmanPlusNemenyi(salivaSampleMeta %>% filter(GenderID == "TM"), salivaSampleMeta %>% filter(GenderID == "TM") %>% select(Total_protein_ug_ml) %>% pull(), timepoints=c(0,3,6,12))
+friedmanPlusNemenyi(salivaSampleMeta %>% filter(GenderID == "TW"), salivaSampleMeta %>% filter(GenderID == "TW") %>% select(Total_protein_ug_ml) %>% pull(), timepoints=c(0,3,6,12))
+
+friedmanPlusNemenyi(salivaSampleMeta %>% left_join(otherMeta) %>% filter(GenderID == "TM"), salivaSampleMeta %>% left_join(otherMeta) %>% filter(GenderID == "TM") %>% select(boppercent) %>% pull(), timepoints=c(0,3,6,12))
+friedmanPlusNemenyi(salivaSampleMeta %>% left_join(otherMeta) %>% filter(GenderID == "TW"), salivaSampleMeta %>% left_join(otherMeta) %>% filter(GenderID == "TW") %>% select(boppercent) %>% pull(), timepoints=c(0,3,6,12))
+
+friedmanPlusNemenyi(salivaSampleMeta %>% left_join(otherMeta) %>% filter(GenderID == "TM"), salivaSampleMeta %>% left_join(otherMeta) %>% filter(GenderID == "TM") %>% select(pH) %>% pull(), timepoints=c(0,3,6,12))
+friedmanPlusNemenyi(salivaSampleMeta %>% left_join(otherMeta) %>% filter(GenderID == "TW"), salivaSampleMeta %>% left_join(otherMeta) %>% filter(GenderID == "TW") %>% select(pH) %>% pull(), timepoints=c(0,3,6,12))
+```
+
+```{r fig 1 plot of blood hormone levels}
+# prepare data for all subsequent plots for fig 1
+temp = salivaSampleMeta %>% filter(newTimepoint %in% c(0,3,12)) %>% mutate(GenderID2 = "Transmasculine")
+temp[temp$GenderID == "TW", "GenderID2"] = "Transfeminine"
+temp = temp %>% mutate(GenderID = factor(GenderID2, levels=c("Transmasculine", "Transfeminine"))) %>% select(-GenderID2)
+
+# Testosterone
+p = matrix(c(0, 0, 3, 12, 9.1e-6, 4.4e-5, 80, 90), nrow=2, ncol=4)
+colnames(p) = c("group1", "group2", "p", "y.position")
+p = as_tibble(p) %>% mutate(group1 = as.character(group1), group2 = as.character(group2)) %>% mutate(p.signif = "ns")
+p[p$p <= 0.05, "p.signif"] = "*"
+p[p$p <= 0.01, "p.signif"] = "**"
+p[p$p <= 0.001, "p.signif"] = "***"
+p[p$p <= 0.0001, "p.signif"] = "****"
+
+a = temp %>% filter(GenderID == "Transmasculine") %>% mutate(newTimepoint = as.factor(newTimepoint)) %>% ggplot(aes(x=newTimepoint,y=Testosterone_nmol_L)) + geom_boxplot(fill=trans_cols[1]) + geom_line(aes(group=as.factor(subject)), col="gray") + geom_point(col="black") + xlab("Timepoint [months]") + ylab("Testosterone [nmol/L]") + stat_pvalue_manual(p, label="p.signif") + theme(legend.position="none", text=element_text(size=14)) + theme_minimal() + annotate("text", x=2, y=105, label = "Friedman p = 1.3e-6", size=3.5)
+
+p = matrix(c(0, 0, 3, 12, 3.5e-5, 3.7e-4, 30, 35), nrow=2, ncol=4)
+colnames(p) = c("group1", "group2", "p", "y.position")
+p = as_tibble(p) %>% mutate(group1 = as.character(group1), group2 = as.character(group2)) %>% mutate(p.signif = "ns")
+p[p$p <= 0.05, "p.signif"] = "*"
+p[p$p <= 0.01, "p.signif"] = "**"
+p[p$p <= 0.001, "p.signif"] = "***"
+p[p$p <= 0.0001, "p.signif"] = "****"
+b = temp %>% filter(GenderID == "Transfeminine") %>% mutate(newTimepoint = as.factor(newTimepoint)) %>% ggplot(aes(x=newTimepoint,y=Testosterone_nmol_L)) + geom_boxplot(fill=trans_cols[2]) + geom_line(aes(group=as.factor(subject)), col="gray") + geom_point(col="black") + xlab("Timepoint [months]") + ylab("Testosterone [nmol/L]") + stat_pvalue_manual(p, label="p.signif") + theme(legend.position="none", text=element_text(size=14)) + theme_minimal() + annotate("text", x=2, y=40, label = "Friedman p = 7.6e-6e-6", size=3.5)
+
+# Estradiol
+p = matrix(c(0, 0, 3, 12, 0.88, 0.13, 1000, 1100), nrow=2, ncol=4)
+colnames(p) = c("group1", "group2", "p", "y.position")
+p = as_tibble(p) %>% mutate(group1 = as.character(group1), group2 = as.character(group2)) %>% mutate(p.signif = "ns")
+p[p$p <= 0.05, "p.signif"] = "*"
+p[p$p <= 0.01, "p.signif"] = "**"
+p[p$p <= 0.001, "p.signif"] = "***"
+p[p$p <= 0.0001, "p.signif"] = "****"
+c = temp %>% filter(GenderID == "Transmasculine") %>% mutate(newTimepoint = as.factor(newTimepoint)) %>% ggplot(aes(x=newTimepoint,y=Estradiol_pmol_ml)) + geom_boxplot(fill=trans_cols[1]) + geom_line(aes(group=as.factor(subject)), col="gray") + geom_point(col="black") + xlab("Timepoint [months]") + ylab("Estradiol [pmol/mL]") + stat_pvalue_manual(p, label="p.signif") + theme(legend.position="none", text=element_text(size=14)) + theme_minimal() + ylim(0, 1300) + annotate("text", x=2, y=1300, label = "Friedman p = 0.13", size=3.5)
+
+p = matrix(c(0, 0, 3, 12, 7.6e-4, 1.7e-4, 1700, 1800), nrow=2, ncol=4)
+colnames(p) = c("group1", "group2", "p", "y.position")
+p = as_tibble(p) %>% mutate(group1 = as.character(group1), group2 = as.character(group2)) %>% mutate(p.signif = "ns")
+p[p$p <= 0.05, "p.signif"] = "*"
+p[p$p <= 0.01, "p.signif"] = "**"
+p[p$p <= 0.001, "p.signif"] = "***"
+p[p$p <= 0.0001, "p.signif"] = "****"
+d = temp %>% filter(GenderID == "Transfeminine") %>% mutate(newTimepoint = as.factor(newTimepoint)) %>% ggplot(aes(x=newTimepoint,y=Estradiol_pmol_ml)) + geom_boxplot(fill=trans_cols[2]) + geom_line(aes(group=as.factor(subject)), col="gray") + geom_point(col="black") + xlab("Timepoint [months]") + ylab("Estradiol [pmol/mL]") + stat_pvalue_manual(p, label="p.signif") + theme(legend.position="none", text=element_text(size=14)) + theme_minimal() + annotate("text", x=2, y=2050, label = "Friedman p = 5.2e-5", size=3.5)
+
+# Fake for legend
+temp %>% ggplot(aes(x=as.factor(newTimepoint),y=Testosterone_nmol_L)) + facet_wrap(vars(GenderID)) + geom_boxplot(aes(fill=GenderID)) + geom_line(aes(group=as.factor(subject)), col="gray") + geom_point(col="black") + xlab("Timepoint [months]") + ylab("Testosterone [nmol/L]") + scale_fill_manual(name="Gender identity", labels=c("Transmasculine", "Transfeminine"), values=trans_cols) + theme(text=element_text(size=14))
+```
+
+```{r figure 2 - clinical and biochemical measurements}
+# prepare data for all subsequent plots for fig 2
+temp = salivaSampleMeta %>% filter(newTimepoint %in% c(0,3,6,12)) %>% mutate(GenderID2 = "Transmasculine")
+temp[temp$GenderID == "TW", "GenderID2"] = "Transfeminine"
+temp = temp %>% mutate(GenderID = factor(GenderID2, levels=c("Transmasculine", "Transfeminine"))) %>% select(-GenderID2)
+
+# MUC5B
+p = matrix(c(0, 0, 0, 3, 6, 12, 0.093, 0.068, 0.125, 800, 900, 1000), nrow=3, ncol=4)
+colnames(p) = c("group1", "group2", "p", "y.position")
+p = as_tibble(p) %>% mutate(group1 = as.character(group1), group2 = as.character(group2)) %>% mutate(p.signif = "ns")
+p[p$p <= 0.05, "p.signif"] = "*"
+p[p$p <= 0.01, "p.signif"] = "**"
+p[p$p <= 0.001, "p.signif"] = "***"
+p[p$p <= 0.0001, "p.signif"] = "****"
+e1 = temp %>% filter(GenderID == "Transmasculine") %>% ggplot(aes(x=as.factor(newTimepoint),y=MUC_5_B_ug_ml)) + geom_boxplot(fill=trans_cols[1]) + geom_line(aes(group=as.factor(subject)), col="gray") + geom_point(col="black") + xlab("Timepoint [months]") + ylab("MUC5B [ug/mL]") + stat_pvalue_manual(p, label="p.signif") + theme(legend.position="none", text=element_text(size=14)) + theme_minimal() + annotate("text", x=2.5, y=1150, label = "Friedman p = 2.1e-6", size=3.5)
+
+p = matrix(c(0, 0, 0, 3, 6, 12, 0.45, 0.095, 0.45, 800, 900, 1000), nrow=3, ncol=4)
+colnames(p) = c("group1", "group2", "p", "y.position")
+p = as_tibble(p) %>% mutate(group1 = as.character(group1), group2 = as.character(group2)) %>% mutate(p.signif = "ns")
+p[p$p <= 0.05, "p.signif"] = "*"
+p[p$p <= 0.01, "p.signif"] = "**"
+p[p$p <= 0.001, "p.signif"] = "***"
+p[p$p <= 0.0001, "p.signif"] = "****"
+e2 = temp %>% filter(GenderID == "Transfeminine") %>% ggplot(aes(x=as.factor(newTimepoint),y=MUC_5_B_ug_ml)) + geom_boxplot(fill=trans_cols[2]) + geom_line(aes(group=as.factor(subject)), col="gray") + geom_point(col="black") + xlab("Timepoint [months]") + ylab("MUC5B [ug/mL]") + stat_pvalue_manual(p, label="p.signif") + theme(legend.position="none", text=element_text(size=14)) + theme_minimal() + annotate("text", x=2.5, y=1150, label = "Friedman p = 7.6e-4", size=3.5)
+
+# Chitinase
+f = temp %>% ggplot(aes(x=as.factor(newTimepoint),y=Chitinase_AU_ml)) + facet_wrap(vars(GenderID)) + geom_boxplot(aes(fill=GenderID)) + geom_line(aes(group=as.factor(subject)), col="gray") + geom_point(col="black") + xlab("Timepoint [months]") + ylab("Chitinase [U/mL]") + scale_fill_manual(name="Gender identity", labels=c("Transmasculine", "Transfeminine"), values=trans_cols) + theme(legend.position="none", text=element_text(size=14)) + theme_bw()
+
+# S-igA
+p = matrix(c(0, 0, 0, 3, 6, 12, 0.055, 0.98, 0.37, 300, 320, 340), nrow=3, ncol=4)
+colnames(p) = c("group1", "group2", "p", "y.position")
+p = as_tibble(p) %>% mutate(group1 = as.character(group1), group2 = as.character(group2)) %>% mutate(p.signif = "ns")
+p[p$p <= 0.05, "p.signif"] = "*"
+p[p$p <= 0.01, "p.signif"] = "**"
+p[p$p <= 0.001, "p.signif"] = "***"
+p[p$p <= 0.0001, "p.signif"] = "****"
+g1 = temp %>% filter(GenderID == "Transmasculine") %>% ggplot(aes(x=as.factor(newTimepoint),y=S_IgA_ug_ml)) + geom_boxplot(fill=trans_cols[1]) + geom_line(aes(group=as.factor(subject)), col="gray") + geom_point(col="black") + xlab("Timepoint [months]") + ylab("S-igA [ug/mL]") + stat_pvalue_manual(p, label="p.signif") + theme(legend.position="none", text=element_text(size=14)) + theme_minimal() + annotate("text", x=2.5, y=375, label = "Friedman p = 1.3e-5", size=3.5)
+
+p = matrix(c(0, 0, 0, 3, 6, 12, 0.35, 0.98, 0.051, 300, 320, 340), nrow=3, ncol=4)
+colnames(p) = c("group1", "group2", "p", "y.position")
+p = as_tibble(p) %>% mutate(group1 = as.character(group1), group2 = as.character(group2)) %>% mutate(p.signif = "ns")
+p[p$p <= 0.05, "p.signif"] = "*"
+p[p$p <= 0.01, "p.signif"] = "**"
+p[p$p <= 0.001, "p.signif"] = "***"
+p[p$p <= 0.0001, "p.signif"] = "****"
+g2 = temp %>% filter(GenderID == "Transfeminine") %>% ggplot(aes(x=as.factor(newTimepoint),y=S_IgA_ug_ml)) + geom_boxplot(fill=trans_cols[2]) + geom_line(aes(group=as.factor(subject)), col="gray") + geom_point(col="black") + xlab("Timepoint [months]") + ylab("S-igA [ug/mL]") + stat_pvalue_manual(p, label="p.signif") + theme(legend.position="none", text=element_text(size=14)) + theme_minimal() + annotate("text", x=2.5, y=375, label = "Friedman p = 4.0e-4", size=3.5)
+
+# Lysozyme
+p = matrix(c(0, 0, 0, 3, 6, 12, 0.27, 0.41, 6.2e-4, 300, 350, 400), nrow=3, ncol=4)
+colnames(p) = c("group1", "group2", "p", "y.position")
+p = as_tibble(p) %>% mutate(group1 = as.character(group1), group2 = as.character(group2)) %>% mutate(p.signif = "ns")
+p[p$p <= 0.05, "p.signif"] = "*"
+p[p$p <= 0.01, "p.signif"] = "**"
+p[p$p <= 0.001, "p.signif"] = "***"
+p[p$p <= 0.0001, "p.signif"] = "****"
+h1 = temp %>% filter(GenderID == "Transmasculine") %>% filter(Lysozyme_U_ml < 500) %>% ggplot(aes(x=as.factor(newTimepoint),y=Lysozyme_U_ml)) + geom_boxplot(fill=trans_cols[1]) + geom_line(aes(group=as.factor(subject)), col="gray") + geom_point(col="black") + xlab("Timepoint [months]") + ylab("Lysozyme [U/mL]") + stat_pvalue_manual(p, label="p.signif") + theme(legend.position="none", text=element_text(size=14)) + theme_minimal() + annotate("text", x=2.5, y=475, label = "Friedman p = 0.0017", size=3.5)
+
+h = temp %>% ggplot(aes(x=as.factor(newTimepoint),y=Lysozyme_U_ml)) + facet_wrap(vars(GenderID)) + geom_boxplot(aes(fill=GenderID)) + geom_line(aes(group=as.factor(subject)), col="gray") + geom_point(col="black") + xlab("Timepoint [months]") + ylab("Lysozyme [U/mL]") + scale_fill_manual(name="Gender identity", labels=c("Transmasculine", "Transfeminine"), values=trans_cols) + theme(legend.position="none", text=element_text(size=14))
+
+# Amylase
+i = temp %>% ggplot(aes(x=as.factor(newTimepoint),y=Amylase_U_ml)) + facet_wrap(vars(GenderID)) + geom_boxplot(aes(fill=GenderID)) + geom_line(aes(group=as.factor(subject)), col="gray") + geom_point(col="black") + xlab("Timepoint [months]") + ylab("Amylase [U/mL]") + scale_fill_manual(name="Gender identity", labels=c("Transmasculine", "Transfeminine"), values=trans_cols) + theme(legend.position="none", text=element_text(size=14)) + theme_bw()
+
+# # Total protein
+j = temp %>% ggplot(aes(x=as.factor(newTimepoint),y=Total_protein_ug_ml)) + facet_wrap(vars(GenderID)) + geom_boxplot(aes(fill=GenderID)) + geom_line(aes(group=as.factor(subject)), col="gray") + geom_point(col="black") + xlab("Timepoint [months]") + ylab("Total protein [ug/mL]") + scale_fill_manual(name="Gender identity", labels=c("Transmasculine", "Transfeminine"), values=trans_cols) + theme(legend.position="none", text=element_text(size=14)) + theme_bw()
+
+# BOP%
+p = matrix(c(0, 0, 0, 3, 6, 12, 0.031, 0.447, 0.569, 40, 50, 60), nrow=3, ncol=4)
+colnames(p) = c("group1", "group2", "p", "y.position")
+p = as_tibble(p) %>% mutate(group1 = as.character(group1), group2 = as.character(group2)) %>% mutate(p.signif = "ns")
+p[p$p <= 0.05, "p.signif"] = "*"
+p[p$p <= 0.01, "p.signif"] = "**"
+p[p$p <= 0.001, "p.signif"] = "***"
+p[p$p <= 0.0001, "p.signif"] = "****"
+k1 = temp %>% left_join(otherMeta) %>% filter(GenderID == "Transmasculine", newTimepoint != 9) %>% ggplot(aes(x=as.factor(newTimepoint),y=boppercent)) + geom_boxplot(fill=trans_cols[1]) + geom_line(aes(group=as.factor(subject)), col="gray") + geom_point(col="black") + xlab("Timepoint [months]") + ylab("BOP [%]") + stat_pvalue_manual(p, label="p.signif") + theme(legend.position="none", text=element_text(size=14)) + theme_minimal() + annotate("text", x=2.5, y=70, label = "Friedman p = 0.068", size=3.5)
+
+# pH
+l = temp %>% left_join(otherMeta) %>% filter(newTimepoint != 9) %>% ggplot(aes(x=as.factor(newTimepoint),y=pH)) + facet_wrap(vars(GenderID)) + geom_boxplot(aes(fill=GenderID)) + geom_line(aes(group=as.factor(subject)), col="gray") + geom_point(col="black") + xlab("Timepoint [months]") + ylab("pH") + scale_fill_manual(name="Gender identity", labels=c("Transmasculine", "Transfeminine"), values=trans_cols) + theme(legend.position="none", text=element_text(size=14)) + theme_bw()
+
+# Supplementary Figure 1:
+ggarrange(f,i,j,l, common.legend = TRUE)
+```
+```{r intermediate - dry mouth data}
+df = read.csv("./Data/CODS_XI.csv")
+df = df[1:40,1:10] %>% as_tibble() %>% filter(Participant_code %in% salivaSampleMeta$Participant_code)
+
+##### --- TESTS --- ########
+
+# CODS TM
+temp = df %>% filter(Gender_ID == "TM") %>% select(Participant_code, CODS_BASELINE, CODS_3_MONTHS, CODS_6_MONTHS, CODS_12_MONTHS) %>% pivot_longer(-Participant_code) %>% mutate(timepoint = NA)
+temp[temp$name == "CODS_BASELINE", "timepoint"] = 0
+temp[temp$name == "CODS_3_MONTHS", "timepoint"] = 3
+temp[temp$name == "CODS_6_MONTHS", "timepoint"] = 6
+temp[temp$name == "CODS_12_MONTHS", "timepoint"] = 12
+temp[temp$value == -99, "value"] = NA
+
+selectedParticipants = temp %>% filter(value != "NA") %>% select(Participant_code) %>% table() %>% as_tibble() %>% filter(n==4) %>% select(Participant_code) %>% pull()
+temp = temp %>% filter(Participant_code %in% selectedParticipants)
+
+temp %>% select(Participant_code) %>% unique() %>% pull() %>% length()
+friedman.test(temp$value, temp$timepoint, temp$Participant_code)
+frdAllPairsNemenyiTest(temp$value, temp$timepoint, temp$Participant_code)
+
+# CODS TW
+temp = df %>% filter(Gender_ID == "TW") %>% select(Participant_code, CODS_BASELINE, CODS_3_MONTHS, CODS_6_MONTHS, CODS_12_MONTHS) %>% pivot_longer(-Participant_code) %>% mutate(timepoint = NA)
+temp[temp$name == "CODS_BASELINE", "timepoint"] = 0
+temp[temp$name == "CODS_3_MONTHS", "timepoint"] = 3
+temp[temp$name == "CODS_6_MONTHS", "timepoint"] = 6
+temp[temp$name == "CODS_12_MONTHS", "timepoint"] = 12
+temp[temp$value == -99, "value"] = NA
+
+selectedParticipants = temp %>% filter(value != "NA") %>% select(Participant_code) %>% table() %>% as_tibble() %>% filter(n==4) %>% select(Participant_code) %>% pull()
+temp = temp %>% filter(Participant_code %in% selectedParticipants)
+
+temp %>% select(Participant_code) %>% unique() %>% pull() %>% length()
+friedman.test(temp$value, temp$timepoint, temp$Participant_code)
+frdAllPairsNemenyiTest(temp$value, temp$timepoint, temp$Participant_code)
+
+# XI TM
+temp = df %>% filter(Gender_ID == "TM") %>% select(Participant_code, XI_BASELINE, XI_3_MONTHS, XI_6_MONTHS, XI_12_MONTHS) %>% pivot_longer(-Participant_code) %>% mutate(timepoint = NA)
+temp[temp$name == "XI_BASELINE", "timepoint"] = 0
+temp[temp$name == "XI_3_MONTHS", "timepoint"] = 3
+temp[temp$name == "XI_6_MONTHS", "timepoint"] = 6
+temp[temp$name == "XI_12_MONTHS", "timepoint"] = 12
+temp[temp$value == -99, "value"] = NA
+
+selectedParticipants = temp %>% filter(value != "NA") %>% select(Participant_code) %>% table() %>% as_tibble() %>% filter(n==4) %>% select(Participant_code) %>% pull()
+temp = temp %>% filter(Participant_code %in% selectedParticipants)
+
+temp %>% select(Participant_code) %>% unique() %>% pull() %>% length()
+friedman.test(temp$value, temp$timepoint, temp$Participant_code)
+frdAllPairsNemenyiTest(temp$value, temp$timepoint, temp$Participant_code)
+
+# XI TW
+temp = df %>% filter(Gender_ID == "TW") %>% select(Participant_code, XI_BASELINE, XI_3_MONTHS, XI_6_MONTHS, XI_12_MONTHS) %>% pivot_longer(-Participant_code) %>% mutate(timepoint = NA)
+temp[temp$name == "XI_BASELINE", "timepoint"] = 0
+temp[temp$name == "XI_3_MONTHS", "timepoint"] = 3
+temp[temp$name == "XI_6_MONTHS", "timepoint"] = 6
+temp[temp$name == "XI_12_MONTHS", "timepoint"] = 12
+temp[temp$value == -99, "value"] = NA
+
+selectedParticipants = temp %>% filter(value != "NA") %>% select(Participant_code) %>% table() %>% as_tibble() %>% filter(n==4) %>% select(Participant_code) %>% pull()
+temp = temp %>% filter(Participant_code %in% selectedParticipants)
+
+temp %>% select(Participant_code) %>% unique() %>% pull() %>% length()
+friedman.test(temp$value, temp$timepoint, temp$Participant_code)
+frdAllPairsNemenyiTest(temp$value, temp$timepoint, temp$Participant_code)
+
+### PLOTS ###
+# CODS
+temp = df %>% select(Participant_code, Gender_ID, CODS_BASELINE, CODS_3_MONTHS, CODS_6_MONTHS, CODS_12_MONTHS) %>% pivot_longer(-c(Participant_code,Gender_ID)) %>% mutate(timepoint = NA)
+temp[temp$name == "CODS_BASELINE", "timepoint"] = 0
+temp[temp$name == "CODS_3_MONTHS", "timepoint"] = 3
+temp[temp$name == "CODS_6_MONTHS", "timepoint"] = 6
+temp[temp$name == "CODS_12_MONTHS", "timepoint"] = 12
+temp[temp$value == -99, "value"] = NA
+temp[temp$Gender_ID == "TM","Gender_ID"] = "Transmasculine"
+temp[temp$Gender_ID == "TW","Gender_ID"] = "Transfeminine"
+
+p = matrix(c(0, 0, 0, 3, 6, 12, 0.91, 0.79, 0.93, 40, 50, 60), nrow=3, ncol=4)
+colnames(p) = c("group1", "group2", "p", "y.position")
+p = as_tibble(p) %>% mutate(group1 = as.character(group1), group2 = as.character(group2)) %>% mutate(p.signif = "ns")
+p[p$p <= 0.05, "p.signif"] = "*"
+p[p$p <= 0.01, "p.signif"] = "**"
+p[p$p <= 0.001, "p.signif"] = "***"
+p[p$p <= 0.0001, "p.signif"] = "****"
+CODS1 = temp %>% filter(Gender_ID == "Transmasculine", timepoint != 9) %>% ggplot(aes(x=as.factor(timepoint),y=value)) + geom_boxplot(fill=trans_cols[1]) + geom_line(aes(group=as.factor(Participant_code)), col="gray") + geom_point(col="black") + xlab("Timepoint [months]") + ylab("Clinical Oral Dryness Score") + stat_pvalue_manual(p, label="p.signif") + theme(legend.position="none", text=element_text(size=14)) + theme_minimal() + annotate("text", x=2.5, y=70, label = "Friedman p = 0.62", size=3.5)
+
+p = matrix(c(0, 0, 0, 3, 6, 12, 0.86, 0.73, 0.73, 40, 50, 60), nrow=3, ncol=4)
+colnames(p) = c("group1", "group2", "p", "y.position")
+p = as_tibble(p) %>% mutate(group1 = as.character(group1), group2 = as.character(group2)) %>% mutate(p.signif = "ns")
+p[p$p <= 0.05, "p.signif"] = "*"
+p[p$p <= 0.01, "p.signif"] = "**"
+p[p$p <= 0.001, "p.signif"] = "***"
+p[p$p <= 0.0001, "p.signif"] = "****"
+CODS2 = temp %>% filter(Gender_ID == "Transfeminine", timepoint != 9) %>% ggplot(aes(x=as.factor(timepoint),y=value)) + geom_boxplot(fill=trans_cols[2]) + geom_line(aes(group=as.factor(Participant_code)), col="gray") + geom_point(col="black") + xlab("Timepoint [months]") + ylab("Clinical Oral Dryness Score") + stat_pvalue_manual(p, label="p.signif") + theme(legend.position="none", text=element_text(size=14)) + theme_minimal() + annotate("text", x=2.5, y=70, label = "Friedman p = 0.62", size=3.5)
+
+# XI
+temp = df %>% select(Participant_code, Gender_ID, XI_BASELINE, XI_3_MONTHS, XI_6_MONTHS, XI_12_MONTHS) %>% pivot_longer(-c(Participant_code,Gender_ID)) %>% mutate(timepoint = NA)
+temp[temp$name == "XI_BASELINE", "timepoint"] = 0
+temp[temp$name == "XI_3_MONTHS", "timepoint"] = 3
+temp[temp$name == "XI_6_MONTHS", "timepoint"] = 6
+temp[temp$name == "XI_12_MONTHS", "timepoint"] = 12
+temp[temp$value == -99, "value"] = NA
+temp[temp$Gender_ID == "TM","Gender_ID"] = "Transmasculine"
+temp[temp$Gender_ID == "TW","Gender_ID"] = "Transfeminine"
+
+p = matrix(c(0, 0, 0, 3, 6, 12, 1, 0.98, 0.012, 40, 50, 60), nrow=3, ncol=4)
+colnames(p) = c("group1", "group2", "p", "y.position")
+p = as_tibble(p) %>% mutate(group1 = as.character(group1), group2 = as.character(group2)) %>% mutate(p.signif = "ns")
+p[p$p <= 0.05, "p.signif"] = "*"
+p[p$p <= 0.01, "p.signif"] = "**"
+p[p$p <= 0.001, "p.signif"] = "***"
+p[p$p <= 0.0001, "p.signif"] = "****"
+XI1 = temp %>% filter(Gender_ID == "Transmasculine", timepoint != 9) %>% ggplot(aes(x=as.factor(timepoint),y=value)) + geom_boxplot(fill=trans_cols[1]) + geom_line(aes(group=as.factor(Participant_code)), col="gray") + geom_point(col="black") + xlab("Timepoint [months]") + ylab("Xerostomia Inventory (XI)") + stat_pvalue_manual(p, label="p.signif") + theme(legend.position="none", text=element_text(size=14)) + theme_minimal() + annotate("text", x=2.5, y=70, label = "Friedman p = 4.4e-3", size=3.5)
+
+p = matrix(c(0, 0, 0, 3, 6, 12, 1, 0.65, 0.99, 40, 50, 60), nrow=3, ncol=4)
+colnames(p) = c("group1", "group2", "p", "y.position")
+p = as_tibble(p) %>% mutate(group1 = as.character(group1), group2 = as.character(group2)) %>% mutate(p.signif = "ns")
+p[p$p <= 0.05, "p.signif"] = "*"
+p[p$p <= 0.01, "p.signif"] = "**"
+p[p$p <= 0.001, "p.signif"] = "***"
+p[p$p <= 0.0001, "p.signif"] = "****"
+XI2 = temp %>% filter(Gender_ID == "Transfeminine", timepoint != 9) %>% ggplot(aes(x=as.factor(timepoint),y=value)) + geom_boxplot(fill=trans_cols[2]) + geom_line(aes(group=as.factor(Participant_code)), col="gray") + geom_point(col="black") + xlab("Timepoint [months]") + ylab("Xerostomia Inventory (XI)") + stat_pvalue_manual(p, label="p.signif") + theme(legend.position="none", text=element_text(size=14)) + theme_minimal() + annotate("text", x=2.5, y=70, label = "Friedman p = 0.62", size=3.5)
+
+```
+
+```{r figure 3 - microbiome description}
+
+prepPCA = function(countData, metaData, timepoints, pseudocount=1, selection=c("TM", "TW")){
+  
+  # Sample selection: >= 5000 total reads
+  sampleMask = rowSums(countData) >= 5000
+  countData = countData[sampleMask,]
+  metaData = metaData[sampleMask,]
+  
+  # Feature selection: sparsity <= 50% in either group
+  TM_mask = metaData$GenderID == "TM"
+  TW_mask = metaData$GenderID == "TW"
+  countData_TM = countData[TM_mask,]
+  countData_TW = countData[TW_mask,]
+  
+  sparsity_TM = colSums(countData_TM==0) / nrow(countData_TM)
+  sparsity_TW = colSums(countData_TW==0) / nrow(countData_TW)
+  featureMask = (sparsity_TM <= 0.5) | (sparsity_TW <= 0.5)
+  
+  countData = countData[,featureMask]
+    
+  df = cbind(countData,metaData) %>% 
+    as_tibble() %>% 
+    filter(newTimepoint %in% timepoints, GenderID %in% selection) %>%
+    dplyr::select(-colnames(metaData))
+  df = df + pseudocount
+  
+  geomeans = pracma::geomean(as.matrix(df), dim=2)
+  df_clr = log(sweep(df, 1, geomeans, FUN="/"))
+  df_clr_cnt = sweep(df_clr, 2, colMeans(df_clr), FUN="-")
+  df_clr_cnt_scl = sweep(df_clr_cnt, 2, apply(df_clr_cnt, 2, sd), FUN="/")
+  svd_result = svd(df_clr_cnt_scl)
+  scores = svd_result$u %*% diag(svd_result$d)
+  loadings = svd_result$v
+  
+  plottableData = cbind(scores[,1:2], metaData %>%
+                          filter(newTimepoint %in% timepoints, GenderID %in% selection) %>%
+                          dplyr::select(subject, GenderID, newTimepoint))
+  
+  Xhat1 = scores[,1] %*% t(loadings[,1])
+  Xhat2 = scores[,2] %*% t(loadings[,2])
+  varExp1 = round(sum(Xhat1^2) / sum(df_clr_cnt_scl^2) * 100, 2)
+  varExp2 = round(sum(Xhat2^2) / sum(df_clr_cnt_scl^2) * 100, 2)
+  
+  p = plottableData %>%
+    ggplot(aes(x=`1`,y=`2`,col=as.factor(GenderID))) +
+    geom_point() +
+    xlab(paste0("PC1 (", varExp1, " %)")) +
+    ylab(paste0("PC2 (", varExp2, " %)")) +
+    scale_colour_manual(name="Gender identity", labels=c("Trans man", "Trans woman"), values=hue_pal()(2))
+  
+  permanova_results = c()
+  if(length(selection) == 2){
+    D = PERMANOVA::DistContinuous(scores)
+    permanova_results[1] = PERMANOVA::PERMANOVA(D, as.factor(plottableData$GenderID))$pvalue
+  }
+  
+  if(length(timepoints) >= 2){
+    D = PERMANOVA::DistContinuous(scores)
+    permanova_results[2] = PERMANOVA::PERMANOVA(D, as.factor(plottableData$newTimepoint))$pvalue
+  }
+  
+  return(list(plottableData, p, permanova_results))
+}
+
+# #### MODELLING TONGUE ###
+# tongue_v1 = prepPCA(tongueDF, tongueSampleMeta, 0)
+# tongue_v4 = prepPCA(tongueDF, tongueSampleMeta, 12)
+# tongue_v1v4 = prepPCA(tongueDF, tongueSampleMeta, c(0,12))
+# tongue_v1v2_TM = prepPCA(tongueDF, tongueSampleMeta, c(0,3), selection="TM")
+# tongue_v1v2_TW = prepPCA(tongueDF, tongueSampleMeta, c(0,3), selection="TW")
+# tongue_v1v2v3v4 = prepPCA(tongueDF, tongueSampleMeta, c(0,3,6,12))
+# 
+# ### MODELLING SALIVA ###
+# saliva_v1 = prepPCA(salivaDF, salivaSampleMeta, 0)
+# saliva_v4 = prepPCA(salivaDF, salivaSampleMeta, 12)
+# saliva_v1v4 = prepPCA(salivaDF, salivaSampleMeta, c(0,12))
+# saliva_v1v2_TM = prepPCA(salivaDF, salivaSampleMeta, c(0,3), selection="TM")
+# saliva_v1v2_TW = prepPCA(salivaDF, salivaSampleMeta, c(0,3), selection="TW")
+# saliva_v1v2v3v4 = prepPCA(salivaDF, salivaSampleMeta, c(0,3,6,12))
+
+### PLOTTING TONGUE ###
+# a = tongue_v1[[2]] + ggtitle("Tongue visit 1")
+# b = tongue_v4[[2]] + ggtitle("Tongue visit 4")
+# c = tongue_v1v4[[2]] + ggtitle("Tongue visits 1, 4")
+# d = tongue_v1v2_TM[[1]] %>% ggplot(aes(x=`1`,y=`2`,col=as.factor(newTimepoint))) + geom_point() + xlab("PC1 (21.45%)") + ylab("PC2 (9.77%)") + scale_colour_manual(name="Time point", values=hue_pal()(2), labels=c(0,3)) + ggtitle("Tongue visits 1,2 (TM only)")
+# e = tongue_v1v2_TW[[1]] %>% ggplot(aes(x=`1`,y=`2`,col=as.factor(newTimepoint))) + geom_point() + xlab("PC1 (17.38%)") + ylab("PC2 (10.02%)") + scale_colour_manual(name="Time point", values=hue_pal()(2), labels=c(0,3)) + ggtitle("Tongue visits 1,2 (TW only)")
+# f = tongue_v1v2v3v4[[2]] + ggtitle("Tongue all visits")
+# ggarrange(a,b,c,d,e,f)
+# 
+# ### PLOTTING SALIVA ###
+# g = saliva_v1[[2]] + ggtitle("Saliva visit 1")
+# h = saliva_v4[[2]] + ggtitle("Saliva visit 4")
+# i = saliva_v1v4[[2]] + ggtitle("Saliva visits 1, 4")
+# j = saliva_v1v2_TM[[1]] %>% ggplot(aes(x=`1`,y=`2`,col=as.factor(newTimepoint))) + geom_point() + xlab("PC1 (21.45%)") + ylab("PC2 (9.77%)") + scale_colour_manual(name="Time point", values=hue_pal()(2), labels=c(0,3)) + ggtitle("Saliva visits 1,2 (TM only)")
+# k = saliva_v1v2_TW[[1]] %>% ggplot(aes(x=`1`,y=`2`,col=as.factor(newTimepoint))) + geom_point() + xlab("PC1 (17.38%)") + ylab("PC2 (10.02%)") + scale_colour_manual(name="Time point", values=hue_pal()(2), labels=c(0,3)) + ggtitle("Saliva visits 1,2 (TW only)")
+# l = saliva_v1v2v3v4[[2]] + ggtitle("Saliva all visits")
+# ggarrange(g,h,i,j,k,l)
+
+### Export data ###
+# write.csv(tongue_v1[[1]], "./20241105_PCA/tongue_v1.csv")
+# write.csv(tongue_v4[[1]], "./20241105_PCA/tongue_v4.csv")
+# write.csv(tongue_v1v4[[1]], "./20241105_PCA/tongue_v1v4.csv")
+# write.csv(tongue_v1v2_TM[[1]], "./20241105_PCA/tongue_v1v2_TM.csv")
+# write.csv(tongue_v1v2_TW[[1]], "./20241105_PCA/tongue_v1v2_TW.csv")
+# write.csv(tongue_v1v2v3v4[[1]], "./20241105_PCA/tongue_v1v2v3v4.csv")
+# 
+# write.csv(saliva_v1[[1]], "./20241105_PCA/saliva_v1.csv")
+# write.csv(saliva_v4[[1]], "./20241105_PCA/saliva_v4.csv")
+# write.csv(saliva_v1v4[[1]], "./20241105_PCA/saliva_v1v4.csv")
+# write.csv(saliva_v1v2_TM[[1]], "./20241105_PCA/saliva_v1v2_TM.csv")
+# write.csv(saliva_v1v2_TW[[1]], "./20241105_PCA/saliva_v1v2_TW.csv")
+# write.csv(saliva_v1v2v3v4[[1]], "./20241105_PCA/saliva_v1v2v3v4.csv")
+
+### END OF PCA PART ###
+
+### Shannon diversity ###
+
+tongueDF_filtered = tongueDF[(rowSums(tongueDF) >= 5000) & (tongueSampleMeta$newTimepoint != 9),]
+salivaDF_filtered = salivaDF[(rowSums(salivaDF) >= 5000) & (salivaSampleMeta$newTimepoint != 9),]
+
+tongueSampleMeta_filtered = tongueSampleMeta[(rowSums(tongueDF) >= 5000) & (tongueSampleMeta$newTimepoint != 9),]
+salivaSampleMeta_filtered = salivaSampleMeta[(rowSums(salivaDF) >= 5000) & (salivaSampleMeta$newTimepoint != 9),]
+
+
+# Tongue
+shannon_tongue = vegan::diversity(tongueDF_filtered, index="shannon")
+tongueDiv = cbind(shannon_tongue, tongueSampleMeta_filtered %>% dplyr::select(subject, GenderID, newTimepoint))
+
+temp = tongueDiv %>% filter(newTimepoint %in% c(0,3,6,12)) %>% mutate(GenderID2 = "Transmasculine")
+temp[temp$GenderID == "TW", "GenderID2"] = "Transfeminine"
+temp = temp %>% mutate(GenderID = factor(GenderID2, levels=c("Transmasculine", "Transfeminine"))) %>% select(-GenderID2)
+
+p = matrix(c(0, 0, 0, 3, 6, 12, 0.34, 1, 0.98, 4.5, 5, 5.5), nrow=3, ncol=4)
+colnames(p) = c("group1", "group2", "p", "y.position")
+p = as_tibble(p) %>% mutate(group1 = as.character(group1), group2 = as.character(group2)) %>% mutate(p.signif = "ns")
+p[p$p <= 0.05, "p.signif"] = "*"
+p[p$p <= 0.01, "p.signif"] = "**"
+p[p$p <= 0.001, "p.signif"] = "***"
+p[p$p <= 0.0001, "p.signif"] = "****"
+x1 = temp %>% filter(GenderID == "Transmasculine", newTimepoint != 9) %>% ggplot(aes(x=as.factor(newTimepoint),y=shannon_tongue)) + geom_boxplot(fill=trans_cols[1]) + geom_line(aes(group=as.factor(subject)), col="gray") + geom_point(col="black") + xlab("Timepoint [months]") + ylab("Shannon diversity") + stat_pvalue_manual(p, label="p.signif") + theme(legend.position="none", text=element_text(size=14)) + theme_minimal() + annotate("text", x=2.5, y=6, label = "Friedman p = 0.28", size=3.5)
+
+p = matrix(c(0, 0, 0, 3, 6, 12, 0.45, 0.66, 0.095, 4.5, 5, 5.5), nrow=3, ncol=4)
+colnames(p) = c("group1", "group2", "p", "y.position")
+p = as_tibble(p) %>% mutate(group1 = as.character(group1), group2 = as.character(group2)) %>% mutate(p.signif = "ns")
+p[p$p <= 0.05, "p.signif"] = "*"
+p[p$p <= 0.01, "p.signif"] = "**"
+p[p$p <= 0.001, "p.signif"] = "***"
+p[p$p <= 0.0001, "p.signif"] = "****"
+x2 = temp %>% filter(GenderID == "Transfeminine", newTimepoint != 9) %>% ggplot(aes(x=as.factor(newTimepoint),y=shannon_tongue)) + geom_boxplot(fill=trans_cols[2]) + geom_line(aes(group=as.factor(subject)), col="gray") + geom_point(col="black") + xlab("Timepoint [months]") + ylab("Shannon diversity") + stat_pvalue_manual(p, label="p.signif") + theme(legend.position="none", text=element_text(size=14)) + theme_minimal() + annotate("text", x=2.5, y=6, label = "Friedman p = 0.14", size=3.5)
+
+# Saliva
+shannon_saliva = vegan::diversity(salivaDF_filtered, index="shannon")
+salivaDiv = cbind(shannon_saliva, salivaSampleMeta_filtered %>% dplyr::select(subject, GenderID, newTimepoint))
+
+temp = salivaDiv %>% filter(newTimepoint %in% c(0,3,6,12)) %>% mutate(GenderID2 = "Transmasculine")
+temp[temp$GenderID == "TW", "GenderID2"] = "Transfeminine"
+temp = temp %>% mutate(GenderID = factor(GenderID2, levels=c("Transmasculine", "Transfeminine"))) %>% select(-GenderID2)
+
+p = matrix(c(0, 0, 0, 3, 6, 12, 0.57, 0.068, 0.095, 4.5, 5, 5.5), nrow=3, ncol=4)
+colnames(p) = c("group1", "group2", "p", "y.position")
+p = as_tibble(p) %>% mutate(group1 = as.character(group1), group2 = as.character(group2)) %>% mutate(p.signif = "ns")
+p[p$p <= 0.05, "p.signif"] = "*"
+p[p$p <= 0.01, "p.signif"] = "**"
+p[p$p <= 0.001, "p.signif"] = "***"
+p[p$p <= 0.0001, "p.signif"] = "****"
+x3 = temp %>% filter(GenderID == "Transmasculine", newTimepoint != 9) %>% ggplot(aes(x=as.factor(newTimepoint),y=shannon_saliva)) + geom_boxplot(fill=trans_cols[1]) + geom_line(aes(group=as.factor(subject)), col="gray") + geom_point(col="black") + xlab("Timepoint [months]") + ylab("Shannon diversity") + stat_pvalue_manual(p, label="p.signif") + theme(legend.position="none", text=element_text(size=14)) + theme_minimal() + annotate("text", x=2.5, y=6, label = "Friedman p = 0.068", size=3.5)
+
+p = matrix(c(0, 0, 0, 3, 6, 12, 0.75, 0.91, 1, 4.5, 5, 5.5), nrow=3, ncol=4)
+colnames(p) = c("group1", "group2", "p", "y.position")
+p = as_tibble(p) %>% mutate(group1 = as.character(group1), group2 = as.character(group2)) %>% mutate(p.signif = "ns")
+p[p$p <= 0.05, "p.signif"] = "*"
+p[p$p <= 0.01, "p.signif"] = "**"
+p[p$p <= 0.001, "p.signif"] = "***"
+p[p$p <= 0.0001, "p.signif"] = "****"
+x4 = temp %>% filter(GenderID == "Transfeminine", newTimepoint != 9) %>% ggplot(aes(x=as.factor(newTimepoint),y=shannon_saliva)) + geom_boxplot(fill=trans_cols[2]) + geom_line(aes(group=as.factor(subject)), col="gray") + geom_point(col="black") + xlab("Timepoint [months]") + ylab("Shannon diversity") + stat_pvalue_manual(p, label="p.signif") + theme(legend.position="none", text=element_text(size=14)) + theme_minimal() + annotate("text", x=2.5, y=6, label = "Friedman p = 0.43", size=3.5)
+
+friedmanPlusNemenyi(tongueDiv %>% as_tibble() %>% filter(GenderID == "TM"), tongueDiv %>% as_tibble() %>% filter(GenderID == "TM") %>% select(shannon_tongue) %>% pull(), timepoints=c(0,3,6,12))
+friedmanPlusNemenyi(tongueDiv %>% as_tibble() %>% filter(GenderID == "TW"), tongueDiv %>% as_tibble() %>% filter(GenderID == "TW") %>% select(shannon_tongue) %>% pull(), timepoints=c(0,3,6,12))
+
+friedmanPlusNemenyi(salivaDiv %>% as_tibble() %>% filter(GenderID == "TM"), salivaDiv %>% as_tibble() %>% filter(GenderID == "TM") %>% select(shannon_saliva) %>% pull(), timepoints=c(0,3,6,12))
+friedmanPlusNemenyi(salivaDiv %>% as_tibble() %>% filter(GenderID == "TW"), salivaDiv %>% as_tibble() %>% filter(GenderID == "TW") %>% select(shannon_saliva) %>% pull(), timepoints=c(0,3,6,12))
+```
+
+```{r pcoa analysis of the microbiome data}
+library(vegan)
+
+set.seed(123)
+METHOD = "bray"
+
+# Tongue - intergroup
+distance_matrix  = vegdist(tongueDF_filtered, method=METHOD)
+pcoa_result = cmdscale(distance_matrix , k=2, eig=TRUE)
+
+permanova_result = adonis2(distance_matrix  ~ GenderID, data = tongueSampleMeta_filtered)
+permanova_text <- paste0(
+  "PERMANOVA: R^2 = ", round(permanova_result$R2[1], 3),
+  ", p = ", permanova_result$Pr[1]
+)
+
+pcoa_df  = data.frame(SampleID = tongueSampleMeta_filtered$subject,
+                  PC1 = pcoa_result$points[,1],
+                  PC2 = pcoa_result$points[,2],
+                  Group = tongueSampleMeta_filtered$GenderID)
+  
+# Plot PCoA with ggplot2
+a = ggplot(pcoa_df, aes(x = PC1, y = PC2, color = Group)) +
+    geom_point(size = 3) +
+    stat_ellipse(type = "t", level = 0.95) +
+    xlab(paste0("PCo1 (", round(pcoa_result$eig[1] / sum(pcoa_result$eig) * 100, 2), "%)")) +
+    ylab(paste0("PCo2 (", round(pcoa_result$eig[2] / sum(pcoa_result$eig) * 100, 2), "%)")) +
+    annotate("text", x = min(pcoa_df$PC1), y = max(pcoa_df$PC2), label = permanova_text, hjust = 0, size=2.5) +
+    scale_colour_manual(name="Gender identity", labels=c("Transmasculine", "Transfeminine"), values=trans_cols) +
+    theme_classic() +
+    theme(legend.position="none", text=element_text(size=14))
+
+# Tongue - TM
+mask = tongueSampleMeta_filtered$GenderID == "TM"
+tongueDF_TM = tongueDF_filtered[mask,]
+tongueSampleMeta_TM = tongueSampleMeta_filtered[mask,]
+
+distance_matrix  = vegdist(tongueDF_TM, method=METHOD)
+pcoa_result = cmdscale(distance_matrix , k=2, eig=TRUE)
+
+permanova_result = adonis2(distance_matrix  ~ newTimepoint, data = tongueSampleMeta_TM)
+permanova_text <- paste0(
+  "PERMANOVA: R^2 = ", round(permanova_result$R2[1], 3),
+  ", p = ", permanova_result$Pr[1]
+)
+
+pcoa_df  = data.frame(SampleID = tongueSampleMeta_TM$subject,
+                  PC1 = pcoa_result$points[,1],
+                  PC2 = pcoa_result$points[,2],
+                  Group = as.factor(tongueSampleMeta_TM$newTimepoint))
+  
+# Plot PCoA with ggplot2
+b = ggplot(pcoa_df, aes(x = PC1, y = PC2, color = Group)) +
+    geom_point(size = 3) +
+    stat_ellipse(type = "t", level = 0.95) +
+    xlab(paste0("PCo1 (", round(pcoa_result$eig[1] / sum(pcoa_result$eig) * 100, 2), "%)")) +
+    ylab(paste0("PCo2 (", round(pcoa_result$eig[2] / sum(pcoa_result$eig) * 100, 2), "%)")) +
+    annotate("text", x = min(pcoa_df$PC1), y = max(pcoa_df$PC2), label = permanova_text, hjust = 0, size=2.5) +
+    theme_classic() +
+    theme(legend.position="none", text=element_text(size=14))
+
+# Tongue - TW
+mask = tongueSampleMeta_filtered$GenderID == "TW"
+tongueDF_TW = tongueDF_filtered[mask,]
+tongueSampleMeta_TW = tongueSampleMeta_filtered[mask,]
+
+distance_matrix  = vegdist(tongueDF_TW, method=METHOD)
+pcoa_result = cmdscale(distance_matrix , k=2, eig=TRUE)
+
+permanova_result = adonis2(distance_matrix  ~ newTimepoint, data = tongueSampleMeta_TW)
+permanova_text <- paste0(
+  "PERMANOVA: R^2 = ", round(permanova_result$R2[1], 3),
+  ", p = ", permanova_result$Pr[1]
+)
+
+pcoa_df  = data.frame(SampleID = tongueSampleMeta_TW$subject,
+                  PC1 = pcoa_result$points[,1],
+                  PC2 = pcoa_result$points[,2],
+                  Group = as.factor(tongueSampleMeta_TW$newTimepoint))
+  
+# Plot PCoA with ggplot2
+c = ggplot(pcoa_df, aes(x = PC1, y = PC2, color = Group)) +
+    geom_point(size = 3) +
+    stat_ellipse(type = "t", level = 0.95) +
+    xlab(paste0("PCo1 (", round(pcoa_result$eig[1] / sum(pcoa_result$eig) * 100, 2), "%)")) +
+    ylab(paste0("PCo2 (", round(pcoa_result$eig[2] / sum(pcoa_result$eig) * 100, 2), "%)")) +
+    annotate("text", x = min(pcoa_df$PC1), y = max(pcoa_df$PC2), label = permanova_text, hjust = 0, size=2.5) +
+    theme_classic() +
+    theme(legend.position="none", text=element_text(size=14))
+
+# Saliva - intergroup
+distance_matrix  = vegdist(salivaDF_filtered, method=METHOD)
+pcoa_result = cmdscale(distance_matrix , k=2, eig=TRUE)
+
+permanova_result = adonis2(distance_matrix  ~ GenderID, data = salivaSampleMeta_filtered)
+permanova_text = paste0("PERMANOVA: R^2 = ", round(permanova_result$R2[1], 3), ", p = ", permanova_result$Pr[1])
+
+pcoa_df  = data.frame(SampleID = salivaSampleMeta_filtered$subject,
+                  PC1 = pcoa_result$points[,1],
+                  PC2 = pcoa_result$points[,2],
+                  Group = salivaSampleMeta_filtered$GenderID)
+  
+# Plot PCoA with ggplot2
+d = ggplot(pcoa_df, aes(x = PC1, y = PC2, color = Group)) +
+    geom_point(size = 3) +
+    stat_ellipse(type = "t", level = 0.95) +
+    xlab(paste0("PCo1 (", round(pcoa_result$eig[1] / sum(pcoa_result$eig) * 100, 2), "%)")) +
+    ylab(paste0("PCo2 (", round(pcoa_result$eig[2] / sum(pcoa_result$eig) * 100, 2), "%)")) +
+    annotate("text", x = min(pcoa_df$PC1), y = max(pcoa_df$PC2), label = permanova_text, hjust = 0, size=2.5) +
+    scale_colour_manual(name="Gender identity", labels=c("Transmasculine", "Transfeminine"), values=trans_cols) +
+    theme_classic() +
+    theme(legend.position="none", text=element_text(size=14))
+
+# For legend
+
+# Saliva - TM
+mask = salivaSampleMeta_filtered$GenderID == "TM"
+salivaDF_TM = salivaDF_filtered[mask,]
+salivaSampleMeta_TM = salivaSampleMeta_filtered[mask,]
+
+distance_matrix  = vegdist(salivaDF_TM, method=METHOD)
+pcoa_result = cmdscale(distance_matrix , k=2, eig=TRUE)
+
+permanova_result = adonis2(distance_matrix  ~ newTimepoint, data = salivaSampleMeta_TM)
+permanova_text = paste0("PERMANOVA: R^2 = ", round(permanova_result$R2[1], 3), ", p = ", permanova_result$Pr[1])
+
+pcoa_df  = data.frame(SampleID = salivaSampleMeta_TM$subject,
+                  PC1 = pcoa_result$points[,1],
+                  PC2 = pcoa_result$points[,2],
+                  Group = as.factor(salivaSampleMeta_TM$newTimepoint))
+  
+# Plot PCoA with ggplot2
+e = ggplot(pcoa_df, aes(x = PC1, y = PC2, color = Group)) +
+    geom_point(size = 3) +
+    stat_ellipse(type = "t", level = 0.95) +
+    xlab(paste0("PCo1 (", round(pcoa_result$eig[1] / sum(pcoa_result$eig) * 100, 2), "%)")) +
+    ylab(paste0("PCo2 (", round(pcoa_result$eig[2] / sum(pcoa_result$eig) * 100, 2), "%)")) +
+    annotate("text", x = min(pcoa_df$PC1), y = max(pcoa_df$PC2), label = permanova_text, hjust = 0, size=2.5) +
+    theme_classic() +
+    theme(legend.position="none", text=element_text(size=14))
+
+# Saliva - TW
+mask = salivaSampleMeta_filtered$GenderID == "TW"
+salivaDF_TW = salivaDF_filtered[mask,]
+salivaSampleMeta_TW = salivaSampleMeta_filtered[mask,]
+
+distance_matrix  = vegdist(salivaDF_TW, method=METHOD)
+pcoa_result = cmdscale(distance_matrix , k=2, eig=TRUE)
+
+permanova_result = adonis2(distance_matrix  ~ newTimepoint, data = salivaSampleMeta_TW)
+permanova_text = paste0("PERMANOVA: R^2 = ", round(permanova_result$R2[1], 3), ", p = ", permanova_result$Pr[1])
+
+pcoa_df  = data.frame(SampleID = salivaSampleMeta_TW$subject,
+                  PC1 = pcoa_result$points[,1],
+                  PC2 = pcoa_result$points[,2],
+                  Group = as.factor(salivaSampleMeta_TW$newTimepoint))
+  
+# Plot PCoA with ggplot2
+f = ggplot(pcoa_df, aes(x = PC1, y = PC2, color = Group)) +
+    geom_point(size = 3) +
+    stat_ellipse(type = "t", level = 0.95) +
+    xlab(paste0("PCo1 (", round(pcoa_result$eig[1] / sum(pcoa_result$eig) * 100, 2), "%)")) +
+    ylab(paste0("PCo2 (", round(pcoa_result$eig[2] / sum(pcoa_result$eig) * 100, 2), "%)")) +
+    annotate("text", x = min(pcoa_df$PC1), y = max(pcoa_df$PC2), label = permanova_text, hjust = 0, size=2.5) +
+    theme_classic() +
+    theme(legend.position="none", text=element_text(size=14))
+
+# For legend
+ggplot(pcoa_df, aes(x = PC1, y = PC2, color = Group)) +
+    geom_point(size = 3) +
+    stat_ellipse(type = "t", level = 0.95) +
+    xlab(paste0("PCo1 (", round(pcoa_result$eig[1] / sum(pcoa_result$eig) * 100, 2), "%)")) +
+    ylab(paste0("PCo2 (", round(pcoa_result$eig[2] / sum(pcoa_result$eig) * 100, 2), "%)")) +
+    annotate("text", x = min(pcoa_df$PC1), y = max(pcoa_df$PC2), label = permanova_text, hjust = 0) +
+    theme_classic()
+```
+
+```{r relative abundance plot for tongue}
+threshold = 0.01 # Set your threshold for "low abundance"
+## TM
+
+# Calculate relative abundance
+countData_tongue = cbind(tongueDF_filtered,tongueSampleMeta_filtered)
+countData_tongue.numeric = countData_tongue %>% select(-colnames(tongueSampleMeta_filtered))
+relAbs_tongue = sweep(countData_tongue.numeric, 1, rowSums(countData_tongue.numeric), FUN="/")
+colnames(relAbs_tongue) = taxonomyTongue$zOTU
+
+# Aggregate by Genus
+agg = aggregate(t(relAbs_tongue), by=list(Genus = as.factor(taxonomyTongue$Genus)), sum)
+
+# Remove g__ prefix and make empty class Unclassified
+names = sub("^g__", "", agg$Genus)
+names[names == ""] = "Unclassified"
+
+# Make into dataframe with meaningful headers
+agg = agg[, -1] %>% t()
+colnames(agg) = names
+agg = as.data.frame(agg)
+
+# Attach metadata and pivot
+final_df = cbind(agg, tongueSampleMeta_filtered %>% select(subject, newTimepoint, GenderID)) %>%
+  as_tibble() %>%
+  filter(GenderID == "TM") %>%
+  select(-GenderID) %>%
+  pivot_longer(-c(subject, newTimepoint), names_to = "Genus", values_to = "value") %>%
+  group_by(newTimepoint, Genus) %>%
+  summarize(mean_abundance = mean(value), .groups = "drop")
+
+# Combine "Unclassified" genera with "Other"
+final_df = final_df %>%
+  mutate(Genus = if_else(Genus == "Unclassified" | mean_abundance < threshold, "Other", Genus))
+
+# Identify "low abundance" genera
+final_df = final_df %>%
+  group_by(newTimepoint, Genus) %>%
+  summarize(mean_abundance = sum(mean_abundance), .groups = "drop")
+
+# Ensure "Other" appears first in the factor levels
+final_df$Genus = fct_relevel(final_df$Genus, "Other", after = 0)
+
+plotData1 = final_df %>% mutate(site = "Tongue", GenderID = "Transmasculine")
+
+## TW
+
+# Calculate relative abundance
+countData_tongue = cbind(tongueDF_filtered,tongueSampleMeta_filtered)
+countData_tongue.numeric = countData_tongue %>% select(-colnames(tongueSampleMeta_filtered))
+relAbs_tongue = sweep(countData_tongue.numeric, 1, rowSums(countData_tongue.numeric), FUN="/")
+colnames(relAbs_tongue) = taxonomyTongue$zOTU
+
+# Aggregate by Genus
+agg = aggregate(t(relAbs_tongue), by=list(Genus = as.factor(taxonomyTongue$Genus)), sum)
+
+# Remove g__ prefix and make empty class Unclassified
+names = sub("^g__", "", agg$Genus)
+names[names == ""] = "Unclassified"
+
+# Make into dataframe with meaningful headers
+agg = agg[, -1] %>% t()
+colnames(agg) = names
+agg = as.data.frame(agg)
+
+# Attach metadata and pivot
+final_df = cbind(agg, tongueSampleMeta_filtered %>% select(subject, newTimepoint, GenderID)) %>%
+  as_tibble() %>%
+  filter(GenderID == "TW") %>%
+  select(-GenderID) %>%
+  pivot_longer(-c(subject, newTimepoint), names_to = "Genus", values_to = "value") %>%
+  group_by(newTimepoint, Genus) %>%
+  summarize(mean_abundance = mean(value), .groups = "drop")
+
+# Combine "Unclassified" genera with "Other"
+final_df = final_df %>%
+  mutate(Genus = if_else(Genus == "Unclassified" | mean_abundance < threshold, "Other", Genus))
+
+# Identify "low abundance" genera
+final_df = final_df %>%
+  group_by(newTimepoint, Genus) %>%
+  summarize(mean_abundance = sum(mean_abundance), .groups = "drop")
+
+# Ensure "Other" appears first in the factor levels
+final_df$Genus = fct_relevel(final_df$Genus, "Other", after = 0)
+
+plotData2 = final_df %>% mutate(site = "Tongue", GenderID = "Transfeminine")
+
+## TM
+
+# Calculate relative abundance
+countData_saliva = cbind(salivaDF_filtered,salivaSampleMeta_filtered)
+countData_saliva.numeric = countData_saliva %>% select(-colnames(salivaSampleMeta_filtered))
+relAbs_saliva = sweep(countData_saliva.numeric, 1, rowSums(countData_saliva.numeric), FUN="/")
+colnames(relAbs_saliva) = taxonomySaliva$zOTU
+
+# Aggregate by Genus
+agg = aggregate(t(relAbs_saliva), by=list(Genus = as.factor(taxonomySaliva$Genus)), sum)
+
+# Remove g__ prefix and make empty class Unclassified
+names = sub("^g__", "", agg$Genus)
+names[names == ""] = "Unclassified"
+
+# Make into dataframe with meaningful headers
+agg = agg[, -1] %>% t()
+colnames(agg) = names
+agg = as.data.frame(agg)
+
+# Attach metadata and pivot
+final_df = cbind(agg, salivaSampleMeta_filtered %>% select(subject, newTimepoint, GenderID)) %>%
+  as_tibble() %>%
+  filter(GenderID == "TM") %>%
+  select(-GenderID) %>%
+  pivot_longer(-c(subject, newTimepoint), names_to = "Genus", values_to = "value") %>%
+  group_by(newTimepoint, Genus) %>%
+  summarize(mean_abundance = mean(value), .groups = "drop")
+
+# Combine "Unclassified" genera with "Other"
+final_df = final_df %>%
+  mutate(Genus = if_else(Genus == "Unclassified" | mean_abundance < threshold, "Other", Genus))
+
+# Identify "low abundance" genera
+final_df = final_df %>%
+  group_by(newTimepoint, Genus) %>%
+  summarize(mean_abundance = sum(mean_abundance), .groups = "drop")
+
+# Ensure "Other" appears first in the factor levels
+final_df$Genus = fct_relevel(final_df$Genus, "Other", after = 0)
+
+# Plot
+plotData3 = final_df %>% mutate(site = "Saliva", GenderID = "Transmasculine")
+
+## TW
+
+# Calculate relative abundance
+countData_saliva = cbind(salivaDF_filtered,salivaSampleMeta_filtered)
+countData_saliva.numeric = countData_saliva %>% select(-colnames(salivaSampleMeta_filtered))
+relAbs_saliva = sweep(countData_saliva.numeric, 1, rowSums(countData_saliva.numeric), FUN="/")
+colnames(relAbs_saliva) = taxonomySaliva$zOTU
+
+# Aggregate by Genus
+agg = aggregate(t(relAbs_saliva), by=list(Genus = as.factor(taxonomySaliva$Genus)), sum)
+
+# Remove g__ prefix and make empty class Unclassified
+names = sub("^g__", "", agg$Genus)
+names[names == ""] = "Unclassified"
+
+# Make into dataframe with meaningful headers
+agg = agg[, -1] %>% t()
+colnames(agg) = names
+agg = as.data.frame(agg)
+
+# Attach metadata and pivot
+final_df = cbind(agg, salivaSampleMeta_filtered %>% select(subject, newTimepoint, GenderID)) %>%
+  as_tibble() %>%
+  filter(GenderID == "TW") %>%
+  select(-GenderID) %>%
+  pivot_longer(-c(subject, newTimepoint), names_to = "Genus", values_to = "value") %>%
+  group_by(newTimepoint, Genus) %>%
+  summarize(mean_abundance = mean(value), .groups = "drop")
+
+# Combine "Unclassified" genera with "Other"
+final_df = final_df %>%
+  mutate(Genus = if_else(Genus == "Unclassified" | mean_abundance < threshold, "Other", Genus))
+
+# Identify "low abundance" genera
+final_df = final_df %>%
+  group_by(newTimepoint, Genus) %>%
+  summarize(mean_abundance = sum(mean_abundance), .groups = "drop")
+
+# Ensure "Other" appears first in the factor levels
+final_df$Genus = fct_relevel(final_df$Genus, "Other", after = 0)
+
+# Plot
+plotData4 = final_df %>% mutate(site = "Saliva", GenderID = "Transfeminine")
+
+plotData = rbind(plotData1, plotData2, plotData3, plotData4)
+
+# Generate unique genus list and color palette before combining low-abundance genera
+plotDataSmall = plotData %>% filter(Genus != "Other")
+all_genera = unique(plotDataSmall$Genus)
+genus_colors = setNames(
+  scales::hue_pal()(length(all_genera)), # Assign distinct colors to all genera
+  sort(all_genera)                      # Sort genera alphabetically for consistent ordering
+)
+# Add gray color for "Other" to the palette
+genus_colors = c(genus_colors, Other = "gray")
+
+# d=final_df %>%
+#   ggplot(aes(x = as.factor(newTimepoint), y = mean_abundance, fill = Genus)) +
+#   geom_bar(stat = "identity", color = "black") +
+#   scale_fill_manual(values = genus_colors) +
+#   labs(x = "Timepoint", y = "Mean Relative Abundance", fill = "Genus") +
+#   theme_minimal()
+# 
+# ggarrange(a,b,c,d, common.legend=TRUE)
+
+a = plotData %>%
+  filter(site == "Saliva", GenderID == "Transfeminine") %>%
+  ggplot(aes(x=as.factor(newTimepoint),y=mean_abundance,fill=as.factor(Genus))) +
+  geom_bar(stat="identity", col="black") +
+  scale_fill_manual(values=genus_colors) +
+  labs(x="Time point [months]", y="Mean relative abundance", fill="Genus") +
+  theme(legend.position="none")
+
+b = plotData %>%
+  filter(site == "Saliva", GenderID == "Transmasculine") %>%
+  ggplot(aes(x=as.factor(newTimepoint),y=mean_abundance,fill=as.factor(Genus))) +
+  geom_bar(stat="identity", col="black") +
+  scale_fill_manual(values=genus_colors) +
+  labs(x="Time point [months]", y="Mean relative abundance", fill="Genus") +
+  theme(legend.position="none")
+
+c = plotData %>%
+  filter(site == "Tongue", GenderID == "Transfeminine") %>%
+  ggplot(aes(x=as.factor(newTimepoint),y=mean_abundance,fill=as.factor(Genus))) +
+  geom_bar(stat="identity", col="black") +
+  scale_fill_manual(values=genus_colors) +
+  labs(x="Time point [months]", y="Mean relative abundance", fill="Genus") +
+  theme(legend.position="none")
+
+d = plotData %>%
+  filter(site == "Tongue", GenderID == "Transmasculine") %>%
+  ggplot(aes(x=as.factor(newTimepoint),y=mean_abundance,fill=as.factor(Genus))) +
+  geom_bar(stat="identity", col="black") +
+  scale_fill_manual(values=genus_colors) +
+  labs(x="Time point [months]", y="Mean relative abundance", fill="Genus") +
+  theme(legend.position="none")
+```
+
+```{r friedman tests for cytokine}
+df = cbind(cytokineDF, cytokineSampleMeta) %>% as_tibble() %>% mutate(subject = Participant_code)
+
+# friedmanPlusNemenyi(df %>% filter(GenderID == "TM"), df %>% filter(GenderID == "TM") %>% select(FGF_basic_pg_ml) %>% pull())
+# friedmanPlusNemenyi(df %>% filter(GenderID == "TW"), df %>% filter(GenderID == "TW") %>% select(FGF_basic_pg_ml) %>% pull())
+# 
+# friedmanPlusNemenyi(df %>% filter(GenderID == "TM"), df %>% filter(GenderID == "TM") %>% select(IL_1b_pg_ml) %>% pull())
+# friedmanPlusNemenyi(df %>% filter(GenderID == "TW"), df %>% filter(GenderID == "TW") %>% select(IL_1b_pg_ml) %>% pull())
+# 
+# friedmanPlusNemenyi(df %>% filter(GenderID == "TM"), df %>% filter(GenderID == "TM") %>% select(G_CSF_pg_ml) %>% pull())
+# friedmanPlusNemenyi(df %>% filter(GenderID == "TW"), df %>% filter(GenderID == "TW") %>% select(G_CSF_pg_ml) %>% pull())
+# 
+# friedmanPlusNemenyi(df %>% filter(GenderID == "TM"), df %>% filter(GenderID == "TM") %>% select(IL_13_pg_ml) %>% pull())
+# friedmanPlusNemenyi(df %>% filter(GenderID == "TW"), df %>% filter(GenderID == "TW") %>% select(IL_13_pg_ml) %>% pull())
+# 
+# friedmanPlusNemenyi(df %>% filter(GenderID == "TM"), df %>% filter(GenderID == "TM") %>% select(IL_12_pg_ml) %>% pull())
+# friedmanPlusNemenyi(df %>% filter(GenderID == "TW"), df %>% filter(GenderID == "TW") %>% select(IL_12_pg_ml) %>% pull())
+# 
+# friedmanPlusNemenyi(df %>% filter(GenderID == "TM"), df %>% filter(GenderID == "TM") %>% select(RANTES_pg_ml) %>% pull())
+# friedmanPlusNemenyi(df %>% filter(GenderID == "TW"), df %>% filter(GenderID == "TW") %>% select(RANTES_pg_ml) %>% pull())
+# 
+# friedmanPlusNemenyi(df %>% filter(GenderID == "TM"), df %>% filter(GenderID == "TM") %>% select(Eotaxin_pg_ml) %>% pull())
+# friedmanPlusNemenyi(df %>% filter(GenderID == "TW"), df %>% filter(GenderID == "TW") %>% select(Eotaxin_pg_ml) %>% pull())
+# 
+# friedmanPlusNemenyi(df %>% filter(GenderID == "TM"), df %>% filter(GenderID == "TM") %>% select(IL_17A_pg_ml) %>% pull())
+# friedmanPlusNemenyi(df %>% filter(GenderID == "TW"), df %>% filter(GenderID == "TW") %>% select(IL_17A_pg_ml) %>% pull())
+# 
+# friedmanPlusNemenyi(df %>% filter(GenderID == "TM"), df %>% filter(GenderID == "TM") %>% select(MIP_1a_pg_ml) %>% pull())
+# friedmanPlusNemenyi(df %>% filter(GenderID == "TW"), df %>% filter(GenderID == "TW") %>% select(MIP_1a_pg_ml) %>% pull())
+# 
+# friedmanPlusNemenyi(df %>% filter(GenderID == "TM"), df %>% filter(GenderID == "TM") %>% select(MIP_1b_pg_ml) %>% pull())
+# friedmanPlusNemenyi(df %>% filter(GenderID == "TW"), df %>% filter(GenderID == "TW") %>% select(MIP_1b_pg_ml) %>% pull())
+# 
+# friedmanPlusNemenyi(df %>% filter(GenderID == "TM"), df %>% filter(GenderID == "TM") %>% select(MCP_1_pg_ml) %>% pull())
+# friedmanPlusNemenyi(df %>% filter(GenderID == "TW"), df %>% filter(GenderID == "TW") %>% select(MCP_1_pg_ml) %>% pull())
+# 
+# friedmanPlusNemenyi(df %>% filter(GenderID == "TM"), df %>% filter(GenderID == "TM") %>% select(EGF_pg_ml) %>% pull())
+# friedmanPlusNemenyi(df %>% filter(GenderID == "TW"), df %>% filter(GenderID == "TW") %>% select(EGF_pg_ml) %>% pull())
+# 
+# friedmanPlusNemenyi(df %>% filter(GenderID == "TM"), df %>% filter(GenderID == "TM") %>% select(VEGF_pg_ml) %>% pull())
+# friedmanPlusNemenyi(df %>% filter(GenderID == "TW"), df %>% filter(GenderID == "TW") %>% select(VEGF_pg_ml) %>% pull())
+# 
+# friedmanPlusNemenyi(df %>% filter(GenderID == "TM"), df %>% filter(GenderID == "TM") %>% select(INF_a_pg_ml) %>% pull())
+# friedmanPlusNemenyi(df %>% filter(GenderID == "TW"), df %>% filter(GenderID == "TW") %>% select(INF_a_pg_ml) %>% pull())
+# 
+# friedmanPlusNemenyi(df %>% filter(GenderID == "TM"), df %>% filter(GenderID == "TM") %>% select(IL_1RA_pg_ml) %>% pull())
+# friedmanPlusNemenyi(df %>% filter(GenderID == "TW"), df %>% filter(GenderID == "TW") %>% select(IL_1RA_pg_ml) %>% pull())
+# 
+# friedmanPlusNemenyi(df %>% filter(GenderID == "TM"), df %>% filter(GenderID == "TM") %>% select(TNF_a_pg_ml) %>% pull())
+# friedmanPlusNemenyi(df %>% filter(GenderID == "TW"), df %>% filter(GenderID == "TW") %>% select(TNF_a_pg_ml) %>% pull())
+# 
+# friedmanPlusNemenyi(df %>% filter(GenderID == "TM"), df %>% filter(GenderID == "TM") %>% select(IL_2_pg_ml) %>% pull())
+# friedmanPlusNemenyi(df %>% filter(GenderID == "TW"), df %>% filter(GenderID == "TW") %>% select(IL_2_pg_ml) %>% pull())
+# 
+# friedmanPlusNemenyi(df %>% filter(GenderID == "TM"), df %>% filter(GenderID == "TM") %>% select(IP_10_pg_ml) %>% pull())
+# friedmanPlusNemenyi(df %>% filter(GenderID == "TW"), df %>% filter(GenderID == "TW") %>% select(IP_10_pg_ml) %>% pull())
+# 
+# friedmanPlusNemenyi(df %>% filter(GenderID == "TM"), df %>% filter(GenderID == "TM") %>% select(IL_2R_pg_ml) %>% pull())
+# friedmanPlusNemenyi(df %>% filter(GenderID == "TW"), df %>% filter(GenderID == "TW") %>% select(IL_2R_pg_ml) %>% pull())
+# 
+# friedmanPlusNemenyi(df %>% filter(GenderID == "TM"), df %>% filter(GenderID == "TM") %>% select(MIG_pg_ml) %>% pull())
+# friedmanPlusNemenyi(df %>% filter(GenderID == "TW"), df %>% filter(GenderID == "TW") %>% select(MIG_pg_ml) %>% pull())
+# 
+# friedmanPlusNemenyi(df %>% filter(GenderID == "TM"), df %>% filter(GenderID == "TM") %>% select(IL_4_pg_ml) %>% pull())
+# friedmanPlusNemenyi(df %>% filter(GenderID == "TW"), df %>% filter(GenderID == "TW") %>% select(IL_4_pg_ml) %>% pull())
+# 
+# friedmanPlusNemenyi(df %>% filter(GenderID == "TM"), df %>% filter(GenderID == "TM") %>% select(IL_8_pg_ml) %>% pull())
+# friedmanPlusNemenyi(df %>% filter(GenderID == "TW"), df %>% filter(GenderID == "TW") %>% select(IL_8_pg_ml) %>% pull())
+```
+
+```{r plots for cytokine}
+# Preparation for plots
+temp = df %>% filter(newTimepoint %in% c(0,3,6,12)) %>% mutate(GenderID2 = "Transmasculine")
+temp[temp$GenderID == "TW", "GenderID2"] = "Transfeminine"
+temp = temp %>% mutate(GenderID = factor(GenderID2, levels=c("Transmasculine", "Transfeminine"))) %>% select(-GenderID2)
+
+# FGF
+a = temp %>% ggplot(aes(x=as.factor(newTimepoint),y=FGF_basic_pg_ml)) + facet_wrap(vars(GenderID)) + geom_boxplot(aes(fill=GenderID)) + geom_line(aes(group=as.factor(subject)), col="gray") + geom_point(col="black") + xlab("Timepoint [months]") + ylab("FGF [pg/mL]") + scale_fill_manual(name="Gender identity", labels=c("Transmasculine", "Transfeminine"), values=trans_cols) + theme(legend.position="none", text=element_text(size=14)) + theme_bw()
+
+# IL-1B
+b = temp %>% ggplot(aes(x=as.factor(newTimepoint),y=IL_1b_pg_ml)) + facet_wrap(vars(GenderID)) + geom_boxplot(aes(fill=GenderID)) + geom_line(aes(group=as.factor(subject)), col="gray") + geom_point(col="black") + xlab("Timepoint [months]") + ylab("IL-1B [pg/mL]") + scale_fill_manual(name="Gender identity", labels=c("Transmasculine", "Transfeminine"), values=trans_cols) + theme(legend.position="none", text=element_text(size=14)) + theme_bw()
+
+# G_CSF
+c = temp %>% ggplot(aes(x=as.factor(newTimepoint),y=G_CSF_pg_ml)) + facet_wrap(vars(GenderID)) + geom_boxplot(aes(fill=GenderID)) + geom_line(aes(group=as.factor(subject)), col="gray") + geom_point(col="black") + xlab("Timepoint [months]") + ylab("G-CSF [pg/mL]") + scale_fill_manual(name="Gender identity", labels=c("Transmasculine", "Transfeminine"), values=trans_cols) + theme(legend.position="none", text=element_text(size=14)) + theme_bw()
+
+# IL-13
+d = temp %>% ggplot(aes(x=as.factor(newTimepoint),y=IL_13_pg_ml)) + facet_wrap(vars(GenderID)) + geom_boxplot(aes(fill=GenderID)) + geom_line(aes(group=as.factor(subject)), col="gray") + geom_point(col="black") + xlab("Timepoint [months]") + ylab("IL-13 [pg/mL]") + scale_fill_manual(name="Gender identity", labels=c("Transmasculine", "Transfeminine"), values=trans_cols) + theme(legend.position="none", text=element_text(size=14)) + theme_bw()
+
+# IL-12
+e = temp %>% ggplot(aes(x=as.factor(newTimepoint),y=IL_12_pg_ml)) + facet_wrap(vars(GenderID)) + geom_boxplot(aes(fill=GenderID)) + geom_line(aes(group=as.factor(subject)), col="gray") + geom_point(col="black") + xlab("Timepoint [months]") + ylab("IL-12 [pg/mL]") + scale_fill_manual(name="Gender identity", labels=c("Transmasculine", "Transfeminine"), values=trans_cols) + theme(legend.position="none", text=element_text(size=14)) + theme_bw()
+
+# RANTES
+f = temp %>% ggplot(aes(x=as.factor(newTimepoint),y=RANTES_pg_ml)) + facet_wrap(vars(GenderID)) + geom_boxplot(aes(fill=GenderID)) + geom_line(aes(group=as.factor(subject)), col="gray") + geom_point(col="black") + xlab("Timepoint [months]") + ylab("RANTES [pg/mL]") + scale_fill_manual(name="Gender identity", labels=c("Transmasculine", "Transfeminine"), values=trans_cols) + theme(legend.position="none", text=element_text(size=14)) + theme_bw()
+
+# Eotaxin
+g = temp %>% ggplot(aes(x=as.factor(newTimepoint),y=Eotaxin_pg_ml)) + facet_wrap(vars(GenderID)) + geom_boxplot(aes(fill=GenderID)) + geom_line(aes(group=as.factor(subject)), col="gray") + geom_point(col="black") + xlab("Timepoint [months]") + ylab("Eotaxin [pg/mL]") + scale_fill_manual(name="Gender identity", labels=c("Transmasculine", "Transfeminine"), values=trans_cols) + theme(legend.position="none", text=element_text(size=14)) + theme_bw()
+
+# IL-17A
+h = temp %>% ggplot(aes(x=as.factor(newTimepoint),y=IL_17A_pg_ml)) + facet_wrap(vars(GenderID)) + geom_boxplot(aes(fill=GenderID)) + geom_line(aes(group=as.factor(subject)), col="gray") + geom_point(col="black") + xlab("Timepoint [months]") + ylab("IL-17A [pg/mL]") + scale_fill_manual(name="Gender identity", labels=c("Transmasculine", "Transfeminine"), values=trans_cols) + theme(legend.position="none", text=element_text(size=14)) + theme_bw()
+
+# MIP-1a
+i = temp %>% ggplot(aes(x=as.factor(newTimepoint),y=MIP_1a_pg_ml)) + facet_wrap(vars(GenderID)) + geom_boxplot(aes(fill=GenderID)) + geom_line(aes(group=as.factor(subject)), col="gray") + geom_point(col="black") + xlab("Timepoint [months]") + ylab("MIP-1A [pg/mL]") + scale_fill_manual(name="Gender identity", labels=c("Transmasculine", "Transfeminine"), values=trans_cols) + theme(legend.position="none", text=element_text(size=14)) + theme_bw()
+
+# MIP-1b
+j = temp %>% ggplot(aes(x=as.factor(newTimepoint),y=MIP_1b_pg_ml)) + facet_wrap(vars(GenderID)) + geom_boxplot(aes(fill=GenderID)) + geom_line(aes(group=as.factor(subject)), col="gray") + geom_point(col="black") + xlab("Timepoint [months]") + ylab("MIP-1B [pg/mL]") + scale_fill_manual(name="Gender identity", labels=c("Transmasculine", "Transfeminine"), values=trans_cols) + theme(legend.position="none", text=element_text(size=14)) + theme_bw()
+
+# MCP-1
+k = temp %>% ggplot(aes(x=as.factor(newTimepoint),y=MCP_1_pg_ml)) + facet_wrap(vars(GenderID)) + geom_boxplot(aes(fill=GenderID)) + geom_line(aes(group=as.factor(subject)), col="gray") + geom_point(col="black") + xlab("Timepoint [months]") + ylab("MCP-1 [pg/mL]") + scale_fill_manual(name="Gender identity", labels=c("Transmasculine", "Transfeminine"), values=trans_cols) + theme(legend.position="none", text=element_text(size=14)) + theme_bw()
+
+# EGF
+p = matrix(c(0, 0, 3, 12, 0.083, 0.11, 3700, 4100), nrow=2, ncol=4)
+colnames(p) = c("group1", "group2", "p", "y.position")
+p = as_tibble(p) %>% mutate(group1 = as.character(group1), group2 = as.character(group2)) %>% mutate(p.signif = "ns")
+p[p$p <= 0.05, "p.signif"] = "*"
+p[p$p <= 0.01, "p.signif"] = "**"
+p[p$p <= 0.001, "p.signif"] = "***"
+p[p$p <= 0.0001, "p.signif"] = "****"
+l2 = temp %>% filter(GenderID == "Transfeminine") %>% ggplot(aes(x=as.factor(newTimepoint),y=EGF_pg_ml)) + geom_boxplot(fill=trans_cols[2]) + geom_line(aes(group=as.factor(subject)), col="gray") + geom_point(col="black") + xlab("Timepoint [months]") + ylab("EGF [pg/mL]") + stat_pvalue_manual(p, label="p.signif") + theme(legend.position="none", text=element_text(size=14)) + theme_minimal() + annotate("text", x=2, y=4800, label = "Friedman p = 0.049", size=3.5) + theme_bw()
+
+l = temp %>% ggplot(aes(x=as.factor(newTimepoint),y=EGF_pg_ml)) + facet_wrap(vars(GenderID)) + geom_boxplot(aes(fill=GenderID)) + geom_line(aes(group=as.factor(subject)), col="gray") + geom_point(col="black") + xlab("Timepoint [months]") + ylab("EGF [pg/mL]") + scale_fill_manual(name="Gender identity", labels=c("Transmasculine", "Transfeminine"), values=trans_cols) + theme(legend.position="none", text=element_text(size=14)) + theme_bw()
+
+# VEGF
+m = temp %>% ggplot(aes(x=as.factor(newTimepoint),y=VEGF_pg_ml)) + facet_wrap(vars(GenderID)) + geom_boxplot(aes(fill=GenderID)) + geom_line(aes(group=as.factor(subject)), col="gray") + geom_point(col="black") + xlab("Timepoint [months]") + ylab("VEGF [pg/mL]") + scale_fill_manual(name="Gender identity", labels=c("Transmasculine", "Transfeminine"), values=trans_cols) + theme(legend.position="none", text=element_text(size=14)) + theme_bw()
+
+# INF-a
+n = temp %>% ggplot(aes(x=as.factor(newTimepoint),y=INF_a_pg_ml)) + facet_wrap(vars(GenderID)) + geom_boxplot(aes(fill=GenderID)) + geom_line(aes(group=as.factor(subject)), col="gray") + geom_point(col="black") + xlab("Timepoint [months]") + ylab("INF-a [pg/mL]") + scale_fill_manual(name="Gender identity", labels=c("Transmasculine", "Transfeminine"), values=trans_cols) + theme(legend.position="none", text=element_text(size=14)) + theme_bw()
+
+# IL-1RA
+p = matrix(c(0, 0, 3, 12, 1, 0.049, 1000000, 1100000), nrow=2, ncol=4)
+colnames(p) = c("group1", "group2", "p", "y.position")
+p = as_tibble(p) %>% mutate(group1 = as.character(group1), group2 = as.character(group2)) %>% mutate(p.signif = "ns")
+p[p$p <= 0.05, "p.signif"] = "*"
+p[p$p <= 0.01, "p.signif"] = "**"
+p[p$p <= 0.001, "p.signif"] = "***"
+p[p$p <= 0.0001, "p.signif"] = "****"
+o1 = temp %>% filter(GenderID == "Transmasculine") %>% ggplot(aes(x=as.factor(newTimepoint),y=IL_1RA_pg_ml)) + geom_boxplot(fill=trans_cols[1]) + geom_line(aes(group=as.factor(subject)), col="gray") + geom_point(col="black") + xlab("Timepoint [months]") + ylab("IL-1RA [pg/mL]") + stat_pvalue_manual(p, label="p.signif") + theme(legend.position="none", text=element_text(size=14)) + theme_minimal() + annotate("text", x=2, y=1250000, label = "Friedman p = 0.025", size=3.5) + theme_bw()
+
+o = temp %>% ggplot(aes(x=as.factor(newTimepoint),y=IL_1RA_pg_ml)) + facet_wrap(vars(GenderID)) + geom_boxplot(aes(fill=GenderID)) + geom_line(aes(group=as.factor(subject)), col="gray") + geom_point(col="black") + xlab("Timepoint [months]") + ylab("IL-1RA [pg/mL]") + scale_fill_manual(name="Gender identity", labels=c("Transmasculine", "Transfeminine"), values=trans_cols) + theme(legend.position="none", text=element_text(size=14)) + theme_bw()
+
+# TNF-a
+q = temp %>% ggplot(aes(x=as.factor(newTimepoint),y=TNF_a_pg_ml)) + facet_wrap(vars(GenderID)) + geom_boxplot(aes(fill=GenderID)) + geom_line(aes(group=as.factor(subject)), col="gray") + geom_point(col="black") + xlab("Timepoint [months]") + ylab("TNF-a [pg/mL]") + scale_fill_manual(name="Gender identity", labels=c("Transmasculine", "Transfeminine"), values=trans_cols) + theme(legend.position="none", text=element_text(size=14)) + theme_bw()
+
+# IL-2
+r = temp %>% ggplot(aes(x=as.factor(newTimepoint),y=IL_2_pg_ml)) + facet_wrap(vars(GenderID)) + geom_boxplot(aes(fill=GenderID)) + geom_line(aes(group=as.factor(subject)), col="gray") + geom_point(col="black") + xlab("Timepoint [months]") + ylab("IL-2 [pg/mL]") + scale_fill_manual(name="Gender identity", labels=c("Transmasculine", "Transfeminine"), values=trans_cols) + theme(legend.position="none", text=element_text(size=14)) + theme_bw()
+
+# IP-10
+p = matrix(c(0, 0, 3, 12, 0.050, 0.98, 15, 17), nrow=2, ncol=4)
+colnames(p) = c("group1", "group2", "p", "y.position")
+p = as_tibble(p) %>% mutate(group1 = as.character(group1), group2 = as.character(group2)) %>% mutate(p.signif = "ns")
+p[p$p <= 0.05, "p.signif"] = "*"
+p[p$p <= 0.01, "p.signif"] = "**"
+p[p$p <= 0.001, "p.signif"] = "***"
+p[p$p <= 0.0001, "p.signif"] = "****"
+s2 = temp %>% filter(GenderID == "Transfeminine") %>% ggplot(aes(x=as.factor(newTimepoint),y=IP_10_pg_ml)) + geom_boxplot(fill=trans_cols[2]) + geom_line(aes(group=as.factor(subject)), col="gray") + geom_point(col="black") + xlab("Timepoint [months]") + ylab("IP-10 [pg/mL]") + stat_pvalue_manual(p, label="p.signif") + theme(legend.position="none", text=element_text(size=14)) + theme_minimal() + annotate("text", x=2, y=20, label = "Friedman p = 0.027", size=3.5) + theme_bw()
+
+s = temp %>% ggplot(aes(x=as.factor(newTimepoint),y=IP_10_pg_ml)) + facet_wrap(vars(GenderID)) + geom_boxplot(aes(fill=GenderID)) + geom_line(aes(group=as.factor(subject)), col="gray") + geom_point(col="black") + xlab("Timepoint [months]") + ylab("IP-10 [pg/mL]") + scale_fill_manual(name="Gender identity", labels=c("Transmasculine", "Transfeminine"), values=trans_cols) + theme(legend.position="none", text=element_text(size=14)) + theme_bw()
+
+# IL-2R
+t = temp %>% ggplot(aes(x=as.factor(newTimepoint),y=IL_2R_pg_ml)) + facet_wrap(vars(GenderID)) + geom_boxplot(aes(fill=GenderID)) + geom_line(aes(group=as.factor(subject)), col="gray") + geom_point(col="black") + xlab("Timepoint [months]") + ylab("IL-2R [pg/mL]") + scale_fill_manual(name="Gender identity", labels=c("Transmasculine", "Transfeminine"), values=trans_cols) + theme(legend.position="none", text=element_text(size=14)) + theme_bw()
+
+# MIG
+u = temp %>% ggplot(aes(x=as.factor(newTimepoint),y=MIG_pg_ml)) + facet_wrap(vars(GenderID)) + geom_boxplot(aes(fill=GenderID)) + geom_line(aes(group=as.factor(subject)), col="gray") + geom_point(col="black") + xlab("Timepoint [months]") + ylab("MIG [pg/mL]") + scale_fill_manual(name="Gender identity", labels=c("Transmasculine", "Transfeminine"), values=trans_cols) + theme(legend.position="none", text=element_text(size=14)) + theme_bw()
+
+# IL-4
+v = temp %>% ggplot(aes(x=as.factor(newTimepoint),y=IL_4_pg_ml)) + facet_wrap(vars(GenderID)) + geom_boxplot(aes(fill=GenderID)) + geom_line(aes(group=as.factor(subject)), col="gray") + geom_point(col="black") + xlab("Timepoint [months]") + ylab("IL-4 [pg/mL]") + scale_fill_manual(name="Gender identity", labels=c("Transmasculine", "Transfeminine"), values=trans_cols) + theme(legend.position="none", text=element_text(size=14)) + theme_bw()
+
+# IL-8
+p = matrix(c(0, 0, 3, 12, 0.59, 0.029, 5000, 5400), nrow=2, ncol=4)
+colnames(p) = c("group1", "group2", "p", "y.position")
+p = as_tibble(p) %>% mutate(group1 = as.character(group1), group2 = as.character(group2)) %>% mutate(p.signif = "ns")
+p[p$p <= 0.05, "p.signif"] = "*"
+p[p$p <= 0.01, "p.signif"] = "**"
+p[p$p <= 0.001, "p.signif"] = "***"
+p[p$p <= 0.0001, "p.signif"] = "****"
+w1 = temp %>% filter(GenderID == "Transmasculine") %>% ggplot(aes(x=as.factor(newTimepoint),y=IL_8_pg_ml)) + geom_boxplot(fill=trans_cols[1]) + geom_line(aes(group=as.factor(subject)), col="gray") + geom_point(col="black") + xlab("Timepoint [months]") + ylab("IL-8 [pg/mL]") + stat_pvalue_manual(p, label="p.signif") + theme(legend.position="none", text=element_text(size=14)) + theme_minimal() + annotate("text", x=2, y=6000, label = "Friedman p = 0.037", size=3.5)
+
+w = temp %>% ggplot(aes(x=as.factor(newTimepoint),y=IL_8_pg_ml)) + facet_wrap(vars(GenderID)) + geom_boxplot(aes(fill=GenderID)) + geom_line(aes(group=as.factor(subject)), col="gray") + geom_point(col="black") + xlab("Timepoint [months]") + ylab("IL-8 [pg/mL]") + scale_fill_manual(name="Gender identity", labels=c("Transmasculine", "Transfeminine"), values=trans_cols) + theme(legend.position="none", text=element_text(size=14)) + theme_bw()
+
+# Plots with something significant according to Friedman
+# Nothing is significant after correction
+
+# Supplementary Figure 2:
+ggarrange(a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,q,r,s,t,u,v,w,common.legend=TRUE,nrow=7, ncol=4)
+```
+
+```{r circos plots}
+# Tongue vs Cytokine
+# shared = tongueSampleMeta %>% select(subject, newTimepoint) %>% inner_join(cytokineSampleMeta %>% mutate(subject=Participant_code) %>% select(subject, newTimepoint)) %>% mutate(combo = paste0(subject,"_",newTimepoint))
+# 
+# tongueMask = (tongueSampleMeta %>% mutate(combo = paste0(subject,"_",newTimepoint)) %>% select(combo) %>% pull()) %in% shared$combo
+# tongueFiltered = tongueDF[tongueMask,]
+# tongueSampleMetaFiltered = tongueSampleMeta[tongueMask,]
+# 
+# tongueTM = tongueSampleMetaFiltered$GenderID == "TM"
+# tongueTW = tongueSampleMetaFiltered$GenderID == "TW"
+# sparsityTM = colSums(tongueFiltered[tongueTM,] == 0) / nrow(tongueFiltered[tongueTM,])
+# sparsityTW = colSums(tongueFiltered[tongueTW,] == 0) / nrow(tongueFiltered[tongueTW,])
+# sparsityMask = (sparsityTM >= 0.5) | (sparsityTW >= 0.5)
+# colnames(tongueFiltered) = taxonomyTongue$zOTU
+# tongueFiltered = tongueFiltered[,sparsityMask]
+# 
+# cytokineMask = (cytokineSampleMeta %>% mutate(combo = paste0(Participant_code,"_",newTimepoint)) %>% select(combo) %>% pull()) %in% shared$combo
+# cytokineFiltered = cytokineDF[cytokineMask,]
+# 
+# tongueCytokineCor = cor(tongueFiltered, cytokineFiltered)
+# df1 = tongueCytokineCor %>% as_tibble() %>% mutate(zOTU = colnames(tongueFiltered)) %>% pivot_longer(-zOTU)
+# 
+# # Saliva vs Cytokine
+# shared = salivaSampleMeta %>% select(subject, newTimepoint) %>% inner_join(cytokineSampleMeta %>% mutate(subject=Participant_code) %>% select(subject, newTimepoint)) %>% mutate(combo = paste0(subject,"_",newTimepoint))
+# 
+# salivaMask = (salivaSampleMeta %>% mutate(combo = paste0(subject,"_",newTimepoint)) %>% select(combo) %>% pull()) %in% shared$combo
+# salivaFiltered = salivaDF[salivaMask,]
+# salivaSampleMetaFiltered = salivaSampleMeta[salivaMask,]
+# 
+# salivaTM = salivaSampleMetaFiltered$GenderID == "TM"
+# salivaTW = salivaSampleMetaFiltered$GenderID == "TW"
+# sparsityTM = colSums(salivaFiltered[salivaTM,] == 0) / nrow(salivaFiltered[salivaTM,])
+# sparsityTW = colSums(salivaFiltered[salivaTW,] == 0) / nrow(salivaFiltered[salivaTW,])
+# sparsityMask = (sparsityTM >= 0.5) | (sparsityTW >= 0.5)
+# colnames(salivaFiltered) = taxonomySaliva$zOTU
+# salivaFiltered = salivaFiltered[,sparsityMask]
+# 
+# cytokineMask = (cytokineSampleMeta %>% mutate(combo = paste0(Participant_code,"_",newTimepoint)) %>% select(combo) %>% pull()) %in% shared$combo
+# cytokineFiltered = cytokineDF[cytokineMask,]
+# 
+# salivaCytokineCor = cor(salivaFiltered, cytokineFiltered)
+# df2 = salivaCytokineCor %>% as_tibble() %>% mutate(zOTU = colnames(salivaFiltered)) %>% pivot_longer(-zOTU)
+
+# Plot
+# # circos.clear()
+# plottableData = rbind(df1,df2) %>% filter(value > 0.4) %>% mutate(value=1)
+# circos.par(gap.after = c(nrow(df1), nrow(df2)))
+# chordDiagram(plottableData)
+# circos.clear()
+```
+
+```{r suppl fig x tongue npls models}
+# Tongue full cohort NPLS plot
+temp = tongue_full$model$A %>% as_tibble() %>% arrange(V3,V2) %>% mutate(index=1:nrow(.))
+temp = temp %>% mutate(V2 = factor(V2, levels=temp$V2))
+
+a=temp %>% ggplot(aes(x=V2,y=V1,fill=as.factor(V3))) + geom_bar(stat="identity",col="black") + xlab("Participant number") + ylab("Component 1") + scale_fill_manual(name="Gender identity", values=trans_cols, labels=c("Transmasculine", "Transfeminine")) + scale_x_discrete(guide=guide_axis(n.dodge=2)) + theme_bw() + theme(legend.position="none", text=element_text(size=12))
+
+
+b = tongue_full$model$B %>% as_tibble() %>% arrange(V5,V6,V7,V8,V9,V10,V3) %>% mutate(index=1:nrow(.)) %>% ggplot(aes(x=index,y=V1,fill=as.factor(V5))) + geom_bar(stat="identity") + xlab("Feature index") + ylab("Component 1") + scale_fill_manual(name="Phylum", values=phylum_cols, labels=c("Actinobacteria", "Bacteroidetes", "Firmicutes", "Fusobacteria", "Proteobacteria")) + theme_bw() + theme(legend.position="none", text=element_text(size=12)) 
+
+c = tongue_full$model$C %>% as_tibble() %>% mutate(gr = 1) %>% ggplot(aes(x=as.factor(V2),y=V1,group=gr)) + geom_point() + geom_path() + xlab("Time point [months]") + ylab("Component 1") + theme_bw() + theme(legend.position="none", text=element_text(size=12))
+
+ggarrange(a,b,c,nrow=1)
+
+# Tongue TM NPLS plot
+d = tongue_TM$model$A %>% as_tibble() %>% ggplot(aes(x=V1,y=V2,label=V3)) + geom_point(col=trans_cols[1]) + geom_text_repel(col="black") + xlab("Component 1") + ylab("Component 2") + theme_bw() + theme(legend.position="none", text=element_text(size=12))
+
+e = tongue_TM$model$B %>% as_tibble() %>% ggplot(aes(x=V1,y=V2,col=as.factor(V6))) + geom_point() + xlab("Component 1") + ylab("Component 2") + scale_fill_manual(name="Phylum", values=phylum_cols, labels=c("Actinobacteria", "Bacteroidetes", "Firmicutes", "Fusobacteria", "Proteobacteria")) + theme_bw() + theme(legend.position="none", text=element_text(size=12))
+
+f = tongue_TM$model$C %>% as_tibble() %>% ggplot(aes(x=V1,y=V2,label=V3)) + geom_point() + geom_path() + geom_text_repel() + xlab("Component 1") + ylab("Component 2") + theme_bw() + theme(legend.position="none", text=element_text(size=12))
+
+ggarrange(d,e,f,nrow=1)
+
+# Tongue TW NPLS plot
+g = tongue_TW$model$A %>% as_tibble() %>% arrange(V2) %>% ggplot(aes(x=as.factor(V2),y=V1)) + geom_bar(stat="identity", col="black", fill=trans_cols[2]) + xlab("Participant number") + ylab("Component 1") + theme_bw()
+
+h = tongue_TW$model$B %>% as_tibble() %>% arrange(V5,V6,V7,V8,V9,V10,V3) %>% mutate(index=1:nrow(.)) %>% ggplot(aes(x=index,y=V1,fill=as.factor(V5))) + geom_bar(stat="identity") + xlab("Feature index") + ylab("") + scale_fill_manual(name="Phylum", values=phylum_cols, labels=c("Actinobacteria", "Bacteroidetes", "Firmicutes", "Fusobacteria", "Proteobacteria")) + theme_bw() + theme(legend.position="none", text=element_text(size=12))
+
+i = tongue_TW$model$C %>% as_tibble() %>% mutate(gr=1) %>% ggplot(aes(x=as.factor(V2),y=V1,group=gr)) + geom_point() + geom_path() + xlab("Time point [months]") + ylab("Component 1") + theme_bw() + theme(legend.position="none", text=element_text(size=12))
+
+ggarrange(g,h,i,nrow=1)
+```
+
+```{r saliva suppl fig x saliva npls plots}
+# Saliva full cohort
+temp = saliva_full$model$A %>% as_tibble() %>% arrange(V3,V2) %>% mutate(index=1:nrow(.))
+temp = temp %>% mutate(V2 = factor(V2, levels=temp$V2))
+
+a=temp %>% ggplot(aes(x=V2,y=V1,fill=as.factor(V3))) + geom_bar(stat="identity",col="black") + xlab("Participant number") + ylab("Component 1") + scale_fill_manual(name="Gender identity", values=trans_cols, labels=c("Transmasculine", "Transfeminine")) + scale_x_discrete(guide=guide_axis(n.dodge=2)) + theme_bw() + theme(legend.position="none", text=element_text(size=12))
+
+b = saliva_full$model$B %>% as_tibble() %>% arrange(V5,V6,V7,V8,V9,V10,V3) %>% mutate(index=1:nrow(.)) %>% ggplot(aes(x=index,y=V1,fill=as.factor(V5))) + geom_bar(stat="identity") + xlab("Feature index") + ylab("Component 1") + scale_fill_manual(name="Phylum", values=phylum_cols, labels=c("Actinobacteria", "Bacteroidetes", "Firmicutes", "Fusobacteria", "Proteobacteria")) + theme_bw() + theme(legend.position="none", text=element_text(size=12))
+
+c = saliva_full$model$C %>% as_tibble() %>% mutate(gr=1) %>% ggplot(aes(x=as.factor(V2),y=V1,group=gr)) + geom_point() + geom_path() + xlab("Time point [months]") + ylab("Component 1") + theme_bw() + theme(legend.position="none", text=element_text(size=12))
+
+ggarrange(a,b,c,nrow=1)
+
+# Saliva TM NPLS plot
+d = saliva_TM$model$A %>% as_tibble() %>% arrange(V2) %>% ggplot(aes(x=as.factor(V2),y=V1)) + geom_bar(stat="identity", col="black", fill=trans_cols[1]) + xlab("Participant number") + ylab("Component 1")+ theme_bw()
+
+e = saliva_TM$model$B %>% as_tibble() %>% arrange(V5,V6,V7,V8,V9,V10,V3) %>% mutate(index=1:nrow(.)) %>% ggplot(aes(x=index,y=V1,fill=as.factor(V5))) + geom_bar(stat="identity") + xlab("Feature index") + ylab("Component 1") + scale_fill_manual(name="Phylum", values=phylum_cols, labels=c("Actinobacteria", "Bacteroidetes", "Firmicutes", "Fusobacteria", "Proteobacteria")) + theme_bw() + theme(legend.position="none", text=element_text(size=12))
+
+f = saliva_TM$model$C %>% as_tibble() %>% mutate(gr=1) %>% ggplot(aes(x=as.factor(V2),y=V1,group=gr)) + geom_point() + geom_path() + xlab("Time point [months]") + ylab("Component 1") + theme_bw() + theme(legend.position="none", text=element_text(size=12))
+
+ggarrange(d,e,f,nrow=1)
+
+# Saliva TW NPLS plot
+g = saliva_TW$model$A %>% as_tibble() %>% arrange(V2) %>% ggplot(aes(x=as.factor(V2),y=V1)) + geom_bar(stat="identity", col="black", fill=trans_cols[2]) + xlab("Participant number") + ylab("Component 1") + theme_bw()
+
+h = saliva_TW$model$B %>% as_tibble() %>% arrange(V5,V6,V7,V8,V9,V10,V3) %>% mutate(index=1:nrow(.)) %>% ggplot(aes(x=index,y=V1,fill=as.factor(V5))) + geom_bar(stat="identity") + xlab("Feature index") + ylab("Component 1") + scale_fill_manual(name="Phylum", values=phylum_cols, labels=c("Actinobacteria", "Bacteroidetes", "Firmicutes", "Fusobacteria", "Proteobacteria")) + theme_bw() + theme(legend.position="none", text=element_text(size=12))
+
+i = saliva_TW$model$C %>% as_tibble() %>% mutate(gr=1) %>% ggplot(aes(x=as.factor(V2),y=V1,group=gr)) + geom_point() + geom_path() + xlab("Time point [months]") + ylab("Component 1") + theme_bw() + theme(legend.position="none", text=element_text(size=12))
+
+ggarrange(g,h,i,nrow=1)
+```
+
+```{r suppl fig x cytokine NPLS plots}
+# Cytokines full cohort
+temp = cytokines_full$model$A %>% as_tibble() %>% arrange(V3,V2) %>% mutate(index=1:nrow(.))
+temp = temp %>% mutate(V2 = factor(V2, levels=temp$V2))
+
+a=temp %>% ggplot(aes(x=V2,y=V1,fill=as.factor(V3))) + geom_bar(stat="identity",col="black") + xlab("Participant number") + ylab("Component 1") + scale_fill_manual(name="Gender identity", values=trans_cols, labels=c("Transmasculine", "Transfeminine")) + scale_x_discrete(guide=guide_axis(n.dodge=2)) + theme_bw() + theme(legend.position="none", text=element_text(size=12))
+
+b = cytokines_full$model$B %>% as_tibble() %>% arrange(V2) %>% mutate(name = str_split_fixed(V2, "_pg_ml", 2)[,1]) %>% ggplot(aes(x=as.factor(name),y=V1)) + geom_bar(stat="identity") + xlab("Cytokine") + ylab("") + theme_bw() + theme(text=element_text(size=12), axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+c = cytokines_full$model$C %>% ggplot(aes(x=V2,y=V1)) + geom_point() + geom_line() + xlab("Time point [months]") + ylab("") + theme_bw() + theme(legend.position="none", text=element_text(size=12)) + scale_x_continuous(breaks=c(0,3,12))
+
+ggarrange(a,b,c,nrow=1)
+
+# Cytokines TM NPLS plot
+d = cytokines_TM$model$A %>% as_tibble() %>% arrange(V2) %>% ggplot(aes(x=as.factor(V2),y=V1)) + geom_bar(stat="identity", col="black", fill=trans_cols[1]) + xlab("Participant number") + ylab("Component 1") +theme_bw() 
+
+e = cytokines_TM$model$B %>% as_tibble() %>% arrange(V2) %>% mutate(name = str_split_fixed(V2, "_pg_ml", 2)[,1]) %>% ggplot(aes(x=as.factor(name),y=V1)) + geom_bar(stat="identity") + xlab("Feature index") + ylab("") +theme_bw() + theme(legend.position="none", text=element_text(size=12), axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+f = cytokines_TM$model$C %>% ggplot(aes(x=V2,y=V1)) + geom_point() + geom_line() + xlab("Time point [months]") + ylab("") +theme_bw() + theme(legend.position="none", text=element_text(size=12)) + scale_x_continuous(breaks=c(0,3,12))
+
+ggarrange(d,e,f,nrow=1)
+
+# Cytokines TW NPLS plot
+g = cytokines_TW$model$A %>% as_tibble() %>% arrange(V2) %>% ggplot(aes(x=as.factor(V2),y=V1)) + geom_bar(stat="identity", col="black", fill=trans_cols[2]) + xlab("Participant number") + ylab("Component 1")+theme_bw() 
+
+h = cytokines_TW$model$B %>% as_tibble() %>% arrange(V2) %>% mutate(name = str_split_fixed(V2, "_pg_ml", 2)[,1]) %>% ggplot(aes(x=as.factor(name),y=V1)) + geom_bar(stat="identity") + xlab("Feature index") + ylab("") + theme_bw() + theme(legend.position="none", text=element_text(size=12), axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+i = cytokines_TW$model$C %>% ggplot(aes(x=V2,y=V1)) + geom_point() + geom_line() + xlab("Time point [months]") + ylab("") + theme_bw() + theme(legend.position="none", text=element_text(size=12)) + scale_x_continuous(breaks=c(0,3,12))
+
+ggarrange(g,h,i,nrow=1)
+```
+
+```{r double check associations}
+
+# Full models - no RMSE check
+ypred_tongue = read.csv("./20241212_Tongue_UNOISE_combined_binary/Tongue_1_ypred.csv", header=FALSE) %>% as_tibble()
+Xhat_tongue_full = parafac4microbiome::reinflateTensor(tongue_full$model$A[,1], tongue_full$model$B[,1], tongue_full$model$C[,1])
+tongue_cor = cor(Xhat_tongue_full[,,1], ypred_tongue[,ncol(ypred_tongue)]) %>% as_tibble() %>% mutate(cor = V4) %>% select(-V4)
+# cbind(tongue_full$model$B, tongue_cor) %>% as_tibble() %>% arrange(desc(V1)) %>% View
+
+ypred_saliva = read.csv("./20241212_Saliva_UNOISE_combined_binary/Saliva_1_ypred.csv", header=FALSE) %>% as_tibble()
+Xhat_saliva_full = parafac4microbiome::reinflateTensor(saliva_full$model$A[,1], saliva_full$model$B[,1], saliva_full$model$C[,1])
+saliva_cor = cor(Xhat_saliva_full[,,1], ypred_saliva[,ncol(ypred_saliva)]) %>% as_tibble() %>% mutate(cor = V4) %>% select(-V4)
+cbind(saliva_full$model$B, saliva_cor) %>% as_tibble() %>% arrange(desc(V1)) %>% View
+
+# TM models
+ypred_tongue = read.csv("./20241212_Tongue_UNOISE_TM_2comp//Tongue_2_ypred.csv", header=FALSE) %>% as_tibble()
+Xhat_tongue_full = parafac4microbiome::reinflateTensor(tongue_TM$model$A[,1], tongue_TM$model$B[,1], tongue_TM$model$C[,1])
+tongue_cor = cor(Xhat_tongue_full[,,1], ypred_tongue[,ncol(ypred_tongue)]) %>% as_tibble() %>% mutate(cor = V4) %>% select(-V4)
+# cbind(tongue_TM$model$B, tongue_cor) %>% as_tibble() %>% arrange(desc(V1)) %>% View
+
+ypred_tongue = read.csv("./20241212_Tongue_UNOISE_TM_2comp//Tongue_2_ypred.csv", header=FALSE) %>% as_tibble()
+Xhat_tongue_full = parafac4microbiome::reinflateTensor(tongue_TM$model$A[,2], tongue_TM$model$B[,2], tongue_TM$model$C[,2])
+tongue_cor = cor(Xhat_tongue_full[,,1], ypred_tongue[,ncol(ypred_tongue)]) %>% as_tibble() %>% mutate(cor = V4) %>% select(-V4)
+# cbind(tongue_TM$model$B, tongue_cor) %>% as_tibble() %>% arrange(desc(V2)) %>% View
+
+res = ypred_tongue %>% mutate(diff = V4 - V1) %>% select(diff) %>% pull()
+sqrt(sum(res^2) / length(res))
+
+ypred_saliva = read.csv("./20241212_Saliva_UNOISE_TM/Saliva_1_ypred.csv", header=FALSE) %>% as_tibble()
+Xhat_saliva_full = parafac4microbiome::reinflateTensor(saliva_TM$model$A[,1], saliva_TM$model$B[,1], saliva_TM$model$C[,1])
+saliva_cor = cor(Xhat_saliva_full[,,1], ypred_saliva[,ncol(ypred_saliva)]) %>% as_tibble() %>% mutate(cor = V4) %>% select(-V4)
+# cbind(saliva_TM$model$B, saliva_cor) %>% as_tibble() %>% arrange(desc(V1)) %>% View
+
+res = ypred_saliva %>% mutate(diff = V4 - V1) %>% select(diff) %>% pull()
+sqrt(sum(res^2) / length(res))
+
+ypred_cytokine = read.csv("./20241212_Cytokines_TM_1comp/Cytokine_1_ypred.csv", header=FALSE) %>% as_tibble()
+Xhat_cytokine_full = parafac4microbiome::reinflateTensor(cytokines_TM$model$A[,1], cytokines_TM$model$B[,1], cytokines_TM$model$C[,1])
+cytokine_cor = cor(Xhat_cytokine_full[,,1], ypred_cytokine[,ncol(ypred_cytokine)]) %>% as_tibble() %>% mutate(cor = V4) %>% select(-V4)
+# cbind(cytokines_TM$model$B, cytokine_cor) %>% as_tibble() %>% arrange(desc(V1)) %>% View
+
+res = ypred_cytokine %>% mutate(diff = V4 - V1) %>% select(diff) %>% pull()
+sqrt(sum(res^2) / length(res))
+
+# TW models
+## Tongue
+ypred_tongue = read.csv("./20241212_Tongue_UNOISE_TW_1comp//Tongue_1_ypred.csv", header=FALSE) %>% as_tibble()
+Xhat_tongue_full = parafac4microbiome::reinflateTensor(tongue_TW$model$A[,1], tongue_TW$model$B[,1], tongue_TW$model$C[,1])
+tongue_cor = cor(Xhat_tongue_full[,,1], ypred_tongue[,ncol(ypred_tongue)]) %>% as_tibble() %>% mutate(cor = V4) %>% select(-V4)
+# cbind(tongue_TW$model$B, tongue_cor) %>% as_tibble() %>% arrange(desc(V1)) %>% View
+
+res = ypred_tongue %>% mutate(diff = V4 - V1) %>% select(diff) %>% pull()
+sqrt(sum(res^2) / length(res))
+
+## Saliva
+ypred_saliva = read.csv("./20241212_Saliva_UNOISE_TW/Saliva_1_ypred.csv", header=FALSE) %>% as_tibble()
+Xhat_saliva_full = parafac4microbiome::reinflateTensor(saliva_TW$model$A[,1], saliva_TW$model$B[,1], saliva_TW$model$C[,1])
+saliva_cor = cor(Xhat_saliva_full[,,1], ypred_saliva[,ncol(ypred_saliva)]) %>% as_tibble() %>% mutate(cor = V4) %>% select(-V4)
+# cbind(saliva_TW$model$B, saliva_cor) %>% as_tibble() %>% arrange(desc(V1)) %>% View
+
+res = ypred_saliva %>% mutate(diff = V4 - V1) %>% select(diff) %>% pull()
+sqrt(sum(res^2) / length(res))
+
+## Cytokine
+ypred_cytokine = read.csv("./20241212_Cytokines_TW/Cytokine_1_ypred.csv", header=FALSE) %>% as_tibble()
+Xhat_cytokine_full = parafac4microbiome::reinflateTensor(cytokines_TW$model$A[,1], cytokines_TW$model$B[,1], cytokines_TW$model$C[,1])
+cytokine_cor = cor(Xhat_cytokine_full[,,1], ypred_cytokine[,ncol(ypred_cytokine)]) %>% as_tibble() %>% mutate(cor = V4) %>% select(-V4)
+# cbind(cytokines_TW$model$B, cytokine_cor) %>% as_tibble() %>% arrange(desc(V1)) %>% View
+
+res = ypred_cytokine %>% mutate(diff = V4 - V1) %>% select(diff) %>% pull()
+sqrt(sum(res^2) / length(res))
+
+```
+
+```{r figure 4 feature loadings}
+# Tongue feature loadings
+threshold = 0.05
+temp = tongue_full$model$B %>%
+  as_tibble() %>%
+  filter(abs(V1) >= threshold) %>%
+  arrange(V1) %>%
+  mutate(index=1:nrow(.)) %>%
+  mutate(Genus = gsub("g__", "", V9), Species = gsub("s__", "", V10)) %>%
+  mutate(Species = gsub("\\(", "", Species)) %>%
+  mutate(Species = gsub("\\)", "", Species))
+
+fixedSpeciesNames = str_split_fixed(temp$Species, "/", 5) %>% 
+  as_tibble() %>%
+  mutate(dplyr::across(.cols = everything(), .fns = ~ dplyr::if_else(stringr::str_detect(.x, "sp."), "", .x)))
+fixedSpeciesNames[fixedSpeciesNames$V1 == "", "V1"] = "sp."
+fixedSpeciesNames = fixedSpeciesNames %>% 
+  mutate(name=paste0(V1, "/", V2)) %>% 
+  mutate(name=gsub("/$", "", name)) %>% 
+  mutate(name=paste0(name, "/", V3)) %>% 
+  mutate(name=gsub("/$", "", name)) %>% 
+  mutate(name=paste0(name, "/", V4)) %>% 
+  mutate(name=gsub("/$", "", name)) %>% 
+  mutate(name=paste0(name, "/", V5)) %>% 
+  mutate(name=gsub("/$", "", name))
+
+temp$Species = fixedSpeciesNames$name
+temp$name = paste0(temp$Genus, " ", temp$Species)
+temp[temp$name == " sp.", "name"] = "Unclassified"
+temp[temp$name == " ", "name"] = "Unclassified"
+temp[temp$name == " sp.", "name"] = "Unclassified"
+
+a = temp %>% ggplot(aes(x=V1,y=as.factor(index),fill=as.factor(V5))) +
+  geom_bar(stat="identity") +
+  scale_fill_manual(name="Phylum", values=phylum_cols, labels=c("Actinobacteria", "Bacteroidetes", "Firmicutes", "Fusobacteria", "Proteobacteria")) +
+  scale_y_discrete(labels=temp$name) +
+  xlab("Component 1") +
+  ylab("") +
+  theme(legend.position="na", text=element_text(size=12), axis.text.y = element_text(face="italic",size=8))
+
+# Saliva feature loadings
+# threshold = 0.075
+temp = saliva_full$model$B %>%
+  as_tibble() %>%
+  filter(abs(V1) >= threshold) %>%
+  arrange(V1) %>%
+  mutate(index=1:nrow(.)) %>%
+  mutate(Genus = gsub("g__", "", V9), Species = gsub("s__", "", V10)) %>%
+  mutate(Species = gsub("\\(", "", Species)) %>%
+  mutate(Species = gsub("\\)", "", Species))
+
+fixedSpeciesNames = str_split_fixed(temp$Species, "/", 5) %>% 
+  as_tibble() %>%
+  mutate(dplyr::across(.cols = everything(), .fns = ~ dplyr::if_else(stringr::str_detect(.x, "sp."), "", .x)))
+fixedSpeciesNames[fixedSpeciesNames$V1 == "", "V1"] = "sp."
+fixedSpeciesNames = fixedSpeciesNames %>% 
+  mutate(name=paste0(V1, "/", V2)) %>% 
+  mutate(name=gsub("/$", "", name)) %>% 
+  mutate(name=paste0(name, "/", V3)) %>% 
+  mutate(name=gsub("/$", "", name)) %>% 
+  mutate(name=paste0(name, "/", V4)) %>% 
+  mutate(name=gsub("/$", "", name)) %>% 
+  mutate(name=paste0(name, "/", V5)) %>% 
+  mutate(name=gsub("/$", "", name))
+
+temp$Species = fixedSpeciesNames$name
+temp$name = paste0(temp$Genus, " ", temp$Species)
+temp[temp$name == "sp.", "name"] = "Unclassified"
+temp[temp$name == " ", "name"] = "Unclassified"
+temp[temp$name == " sp.", "name"] = "Unclassified"
+
+b = temp %>% ggplot(aes(x=V1,y=as.factor(index),fill=as.factor(V5))) +
+  geom_bar(stat="identity") +
+  scale_fill_manual(name="Phylum", values=phylum_cols, labels=c("Actinobacteria", "Bacteroidetes", "Firmicutes", "Fusobacteria", "Proteobacteria")) +
+  scale_y_discrete(labels=temp$name) +
+  xlab("Component 1") +
+  ylab("") +
+  theme(legend.position="na", text=element_text(size=12), axis.text.y = element_text(face="italic",size=8))
+
+# Tongue TW feature loadings
+# threshold = 0.075
+temp = tongue_TW$model$B %>%
+  as_tibble() %>%
+  filter(abs(V1) >= threshold) %>%
+  arrange(V1) %>%
+  mutate(index=1:nrow(.)) %>%
+  mutate(Genus = gsub("g__", "", V9), Species = gsub("s__", "", V10)) %>%
+  mutate(Species = gsub("\\(", "", Species)) %>%
+  mutate(Species = gsub("\\)", "", Species))
+
+fixedSpeciesNames = str_split_fixed(temp$Species, "/", 5) %>% 
+  as_tibble() %>%
+  mutate(dplyr::across(.cols = everything(), .fns = ~ dplyr::if_else(stringr::str_detect(.x, "sp."), "", .x)))
+fixedSpeciesNames[fixedSpeciesNames$V1 == "", "V1"] = "sp."
+fixedSpeciesNames = fixedSpeciesNames %>% 
+  mutate(name=paste0(V1, "/", V2)) %>% 
+  mutate(name=gsub("/$", "", name)) %>% 
+  mutate(name=paste0(name, "/", V3)) %>% 
+  mutate(name=gsub("/$", "", name)) %>% 
+  mutate(name=paste0(name, "/", V4)) %>% 
+  mutate(name=gsub("/$", "", name)) %>% 
+  mutate(name=paste0(name, "/", V5)) %>% 
+  mutate(name=gsub("/$", "", name))
+
+temp$Species = fixedSpeciesNames$name
+temp$name = paste0(temp$Genus, " ", temp$Species)
+temp[temp$name == "sp.", "name"] = "Unclassified"
+temp[temp$name == " ", "name"] = "Unclassified"
+temp[temp$name == " sp.", "name"] = "Unclassified"
+
+c = temp %>% ggplot(aes(x=V1,y=as.factor(index),fill=as.factor(V5))) +
+  geom_bar(stat="identity") +
+  scale_fill_manual(name="Phylum", values=phylum_cols, labels=c("Actinobacteria", "Bacteroidetes", "Firmicutes", "Fusobacteria", "Proteobacteria")) +
+  scale_y_discrete(labels=temp$name) +
+  xlab("Component 1") +
+  ylab("") +
+  theme(legend.position="na", text=element_text(size=12), axis.text.y = element_text(face="italic",size=8))
+
+# Tongue TM feature loadings
+# threshold = 0.075
+temp = tongue_TM$model$B %>%
+  as_tibble() %>%
+  filter(abs(V1) >= threshold) %>%
+  arrange(V1) %>%
+  mutate(index=1:nrow(.)) %>%
+  mutate(Genus = gsub("g__", "", V10), Species = gsub("s__", "", V11)) %>%
+  mutate(Species = gsub("\\(", "", Species)) %>%
+  mutate(Species = gsub("\\)", "", Species))
+
+fixedSpeciesNames = str_split_fixed(temp$Species, "/", 5) %>% 
+  as_tibble() %>%
+  mutate(dplyr::across(.cols = everything(), .fns = ~ dplyr::if_else(stringr::str_detect(.x, "sp."), "", .x)))
+fixedSpeciesNames[fixedSpeciesNames$V1 == "", "V1"] = "sp."
+fixedSpeciesNames = fixedSpeciesNames %>% 
+  mutate(name=paste0(V1, "/", V2)) %>% 
+  mutate(name=gsub("/$", "", name)) %>% 
+  mutate(name=paste0(name, "/", V3)) %>% 
+  mutate(name=gsub("/$", "", name)) %>% 
+  mutate(name=paste0(name, "/", V4)) %>% 
+  mutate(name=gsub("/$", "", name)) %>% 
+  mutate(name=paste0(name, "/", V5)) %>% 
+  mutate(name=gsub("/$", "", name))
+
+temp$Species = fixedSpeciesNames$name
+temp$name = paste0(temp$Genus, " ", temp$Species)
+temp[temp$name == "sp.", "name"] = "Unclassified"
+temp[temp$name == " ", "name"] = "Unclassified"
+temp[temp$name == " sp.", "name"] = "Unclassified"
+
+d = temp %>% ggplot(aes(x=V1,y=as.factor(index),fill=as.factor(V6))) +
+  geom_bar(stat="identity") +
+  scale_fill_manual(name="Phylum", values=phylum_cols, labels=c("Actinobacteria", "Bacteroidetes", "Firmicutes", "Fusobacteria", "Proteobacteria")) +
+  scale_y_discrete(labels=temp$name) +
+  xlab("Component 1") +
+  ylab("") +
+  theme(legend.position="na", text=element_text(size=12), axis.text.y = element_text(face="italic",size=8))
+
+temp = tongue_TM$model$B %>%
+  as_tibble() %>%
+  filter(abs(V2) >= threshold) %>%
+  arrange(V2) %>%
+  mutate(index=1:nrow(.)) %>%
+  mutate(Genus = gsub("g__", "", V10), Species = gsub("s__", "", V11)) %>%
+  mutate(Species = gsub("\\(", "", Species)) %>%
+  mutate(Species = gsub("\\)", "", Species))
+
+fixedSpeciesNames = str_split_fixed(temp$Species, "/", 5) %>% 
+  as_tibble() %>%
+  mutate(dplyr::across(.cols = everything(), .fns = ~ dplyr::if_else(stringr::str_detect(.x, "sp."), "", .x)))
+fixedSpeciesNames[fixedSpeciesNames$V1 == "", "V1"] = "sp."
+fixedSpeciesNames = fixedSpeciesNames %>% 
+  mutate(name=paste0(V1, "/", V2)) %>% 
+  mutate(name=gsub("/$", "", name)) %>% 
+  mutate(name=paste0(name, "/", V3)) %>% 
+  mutate(name=gsub("/$", "", name)) %>% 
+  mutate(name=paste0(name, "/", V4)) %>% 
+  mutate(name=gsub("/$", "", name)) %>% 
+  mutate(name=paste0(name, "/", V5)) %>% 
+  mutate(name=gsub("/$", "", name))
+
+temp$Species = fixedSpeciesNames$name
+temp$name = paste0(temp$Genus, " ", temp$Species)
+temp[temp$name == "sp.", "name"] = "Unclassified"
+temp[temp$name == " ", "name"] = "Unclassified"
+temp[temp$name == " sp.", "name"] = "Unclassified"
+
+e = temp %>% ggplot(aes(x=V2,y=as.factor(index),fill=as.factor(V6))) +
+  geom_bar(stat="identity") +
+  scale_fill_manual(name="Phylum", values=phylum_cols, labels=c("Actinobacteria", "Bacteroidetes", "Firmicutes", "Fusobacteria", "Proteobacteria")) +
+  scale_y_discrete(labels=temp$name) +
+  xlab("Component 2") +
+  ylab("") +
+  theme(legend.position="na", text=element_text(size=12), axis.text.y = element_text(face="italic",size=8))
+
+# Saliva TM feature loadings
+# threshold = 0.075
+temp = saliva_TM$model$B %>%
+  as_tibble() %>%
+  filter(abs(V1) >= threshold) %>%
+  arrange(V1) %>%
+  mutate(index=1:nrow(.)) %>%
+  mutate(Genus = gsub("g__", "", V9), Species = gsub("s__", "", V10)) %>%
+  mutate(Species = gsub("\\(", "", Species)) %>%
+  mutate(Species = gsub("\\)", "", Species))
+
+fixedSpeciesNames = str_split_fixed(temp$Species, "/", 5) %>% 
+  as_tibble() %>%
+  mutate(dplyr::across(.cols = everything(), .fns = ~ dplyr::if_else(stringr::str_detect(.x, "sp."), "", .x)))
+fixedSpeciesNames[fixedSpeciesNames$V1 == "", "V1"] = "sp."
+fixedSpeciesNames = fixedSpeciesNames %>% 
+  mutate(name=paste0(V1, "/", V2)) %>% 
+  mutate(name=gsub("/$", "", name)) %>% 
+  mutate(name=paste0(name, "/", V3)) %>% 
+  mutate(name=gsub("/$", "", name)) %>% 
+  mutate(name=paste0(name, "/", V4)) %>% 
+  mutate(name=gsub("/$", "", name)) %>% 
+  mutate(name=paste0(name, "/", V5)) %>% 
+  mutate(name=gsub("/$", "", name))
+
+temp$Species = fixedSpeciesNames$name
+temp$name = paste0(temp$Genus, " ", temp$Species)
+temp[temp$name == "sp.", "name"] = "Unclassified"
+temp[temp$name == " ", "name"] = "Unclassified"
+temp[temp$name == " sp.", "name"] = "Unclassified"
+
+f = temp %>% ggplot(aes(x=V1,y=as.factor(index),fill=as.factor(V5))) +
+  geom_bar(stat="identity") +
+  scale_fill_manual(name="Phylum", values=phylum_cols, labels=c("Actinobacteria", "Bacteroidetes", "Firmicutes", "Fusobacteria", "Proteobacteria")) +
+  scale_y_discrete(labels=temp$name) +
+  xlab("Component 1") +
+  ylab("") +
+  theme(legend.position="na", text=element_text(size=12), axis.text.y = element_text(face="italic",size=8))
+
+## Cytokines TM -- SCRAPPED
+temp = cytokines_TM$model$B %>% as_tibble() %>% arrange(V1) %>% mutate(index=1:nrow(.)) %>% mutate(name = str_split_fixed(V2, "_pg_ml", 2)[,1])
+
+g = temp %>% ggplot(aes(x=V1,y=as.factor(index))) + geom_bar(stat="identity") + scale_y_discrete(labels=temp$name) + xlab("Component 1") + ylab("Cytokine") + theme(legend.position="na", text=element_text(size=12), axis.text.y = element_text(face="italic",size=8))
+
+a
+b
+c
+d
+e
+f
+```
+
+## Clustering the tongue result for Figure 4D
+
+```{r filter features for clustering}
+tongue = tongue_full
+
+conLoad = function(X, model, mode, numComponents){
+  I = dim(X)[1]
+  J = dim(X)[2]
+  K = dim(X)[3]
+  
+  if(mode == 1){
+    Z = multiway::krprod(model[[3]], model[[2]])
+    congruences = matrix(0, nrow=I, ncol=numComponents)
+    
+    for(f in 1:numComponents){
+      vectZ = c(Z[,f])
+      b = model[[2]][,f]
+      c = model[[3]][,f]
+      
+      for(i in 1:I){
+        Xi = X[i,,]
+        vectX = c(Xi)
+        congruences[i,f] = multiway::congru(vectZ, vectX)
+      }
+    }
+  }
+  else if(mode == 2){
+    Z = multiway::krprod(as.matrix(model[[3]]), as.matrix(model[[1]]))
+    congruences = matrix(0, nrow=J, ncol=numComponents)
+    
+    for(f in 1:numComponents){
+      vectZ = c(Z[,f])
+      for(j in 1:J){
+        vectX = c(X[,j,])
+        mask = !is.na(vectX)
+        congruences[j,f] = multiway::congru(vectZ[mask], vectX[mask])
+      }
+    }
+  }
+  else if(mode == 3){
+    Z = multiway::krprod(model[[2]], model[[1]])
+    congruences = matrix(0, nrow=K, ncol=numComponents)
+    
+    for(f in 1:numComponents){
+      vectZ = c(Z[,f])
+      for(k in 1:K){
+        vectX = c(X[,,k])
+        congruences[k,f] = multiway::congru(vectZ, vectX)
+      }
+    }
+  }
+  return(congruences)
+}
+
+# Lazy solution to getting a long matrix
+I = nrow(tongue$dataset$mode1)
+J = nrow(tongue$dataset$mode2)
+K = nrow(tongue$dataset$mode3)
+X_wide = tongue$dataset$data
+X_long = X_wide[,1:J]
+Xhat_wide = tongue$reconstructedData
+Xhat_long = Xhat_wide[,1:J]
+X_cube = array(0L, dim=c(I,J,K))
+
+for(k in 1:(K-1)){
+  indexStart = k*J+1
+  indexEnd = (k+1)*J
+  
+  attachment = X_wide[,indexStart:indexEnd]
+  otherAttachment = Xhat_wide[,indexStart:indexEnd]
+  
+  colnames(attachment) = colnames(X_long) # silly thing to make rbind not complain
+  colnames(otherAttachment) = colnames(X_long) # silly thing to make rbind not complain
+  
+  X_long = rbind(X_long, attachment)
+  Xhat_long = rbind(Xhat_long, otherAttachment)
+  print(dim(attachment))
+  X_cube[,,k] = as.matrix(attachment)
+}
+X_cube[,,K] = as.matrix(X_wide[,667:ncol(X_wide)])
+
+
+# Determine variance explained
+featuresVarExp = 1:dim(Xhat_long)[2]
+modelVarExp = round(multiway::sumsq(tongue$reconstructedData) / multiway::sumsq(tongue$dataset$data, na.rm=TRUE) * 100,2)
+
+for(i in 1:dim(Xhat_long)[2]){
+  featuresVarExp[i] = multiway::sumsq(Xhat_long[,i], na.rm=TRUE) / multiway::sumsq(X_long[,i], na.rm=TRUE)
+}
+
+# Determine congruence
+tongueFac = list(tongue$model$A[,1], tongue$model$B[,1], tongue$model$C[,1])
+featureCongruences = conLoad(X_cube, tongueFac, 2, 1)
+
+# Establish feature mask
+varExpThreshold = modelVarExp/100
+congruenceThreshold = 0.5
+featureMask = (featuresVarExp >= varExpThreshold) | (rowSums(featureCongruences>=congruenceThreshold) >= 1)
+```
+
+```{r cluster features based on modelled data}
+library(cluster)
+library(factoextra)
+library(scales)
+
+Xhat_filtered_long = Xhat_long[,featureMask]
+
+# Clustering diagnostics
+a = fviz_nbclust(t(Xhat_filtered_long), pam, method="wss")
+b = fviz_nbclust(t(Xhat_filtered_long), pam, method="silhouette")
+c = fviz_nbclust(t(Xhat_filtered_long), pam, method="gap_stat")
+ggarrange(a,b,c, nrow=3)
+
+# Cluster
+set.seed(1)
+numClusters = 2
+clusteringResult = pam(t(Xhat_filtered_long), numClusters, nstart=50)
+result = tongue$dataset$mode2[featureMask,] %>% as_tibble() %>% mutate(cluster=clusteringResult$clustering)
+
+# Flip the clusters to make them homogenous with saliva result
+result$cluster2 = result$cluster
+result[result$cluster == 1, "cluster2"] = 2
+result[result$cluster == 2, "cluster2"] = 1
+result = result %>% select(-cluster) %>% mutate(cluster = cluster2) %>% select(-cluster2)
+
+clusteredFeatures = cbind(transformPARAFACloadings(tongueFac, 2), tongue$dataset$mode2) %>% as_tibble() %>% left_join(result) %>% mutate(V1 = as.numeric(V1))
+colnames(clusteredFeatures) = c("transformedLoadings", colnames(clusteredFeatures[2:11]))
+clusteredFeatures %>% ggplot(aes(x=transformedLoadings,y=0,col=as.factor(cluster))) + geom_point() + xlab("Feature mode, component 1 (transformed)") + ylab("Feature mode, component 2 (transformed)") + scale_color_manual(name = "Cluster", labels=c("1","2","Not clustered"), values=hue_pal()(2)) + theme(legend.position="bottom",text=element_text(size=14))
+
+# Alternative cluster loadings plots
+temp = clusteredFeatures %>% arrange(transformedLoadings) %>% mutate(index=1:nrow(.), name=paste0(Genus, " ", Species)) %>% filter(cluster != "NA")
+temp %>% arrange(transformedLoadings) %>% mutate(index=1:nrow(.)) %>% ggplot(aes(y=as.factor(index),x=transformedLoadings,fill=as.factor(cluster))) + geom_bar(stat="identity") + scale_y_discrete(name="Microbiota", label=temp$name)
+```
+
+```{r relabs plots of clusters}
+countData_tongue = cbind(tongueDF,tongueSampleMeta)
+countData_tongue.numeric = countData_tongue %>% select(-colnames(tongueSampleMeta))
+relAbs_tongue = sweep(countData_tongue.numeric, 1, rowSums(countData_tongue.numeric), FUN="/")
+colnames(relAbs_tongue) = taxonomyTongue$zOTU
+
+clusterStr = c("Cluster 1 - transfeminine enriched", "Cluster 2 - transmasculine enriched")
+
+
+temp = relAbs_tongue %>% as_tibble() %>% mutate(subject=countData_tongue$subject,newTimepoint=countData_tongue$newTimepoint) %>% pivot_longer(-c(subject,newTimepoint)) %>% left_join(tongueSampleMeta %>% select(subject,newTimepoint,GenderID)) %>% left_join(clusteredFeatures,by=c("name"="zOTU")) %>% filter(cluster != "NA") %>% select(subject,newTimepoint,GenderID,name,value,cluster) %>% group_by(subject,newTimepoint,cluster) %>% summarize(s=sum(value)) %>% left_join(tongueSampleMeta %>% select(subject,newTimepoint,GenderID)) %>% ungroup() %>% filter(GenderID != "NA") %>% group_by(GenderID,newTimepoint,cluster) %>% summarize(m=mean(s,na.rm=TRUE),v=plotrix::std.error(s,na.rm=TRUE)) %>% ungroup() %>% mutate(cluster_str = clusterStr[cluster]) %>% filter(newTimepoint != 9)
+
+relAbs_tongue %>% as_tibble() %>% mutate(subject=countData_tongue$subject,newTimepoint=countData_tongue$newTimepoint) %>% pivot_longer(-c(subject,newTimepoint)) %>% left_join(tongueSampleMeta %>% select(subject,newTimepoint,GenderID)) %>% left_join(clusteredFeatures,by=c("name"="zOTU")) %>% filter(cluster != "NA") %>% select(subject,newTimepoint,GenderID,name,value,cluster) %>% group_by(subject,newTimepoint,cluster) %>% summarize(s=sum(value)) %>% left_join(tongueSampleMeta %>% select(subject,newTimepoint,GenderID)) %>% ungroup() %>% filter(GenderID != "NA") %>% group_by(GenderID,newTimepoint,cluster) %>% summarize(m=mean(s,na.rm=TRUE),v=plotrix::std.error(s,na.rm=TRUE)) %>% ungroup() %>% mutate(cluster_str = clusterStr[cluster]) %>% filter(newTimepoint != 9) %>% ggplot(aes(x=as.factor(newTimepoint),y=m,col=as.factor(GenderID),group=as.factor(GenderID))) + facet_wrap(~cluster_str) + geom_line() + geom_errorbar(aes(ymax=m+v,ymin=m-v,width=.2)) + geom_point() + xlab("Time point [months]") + ylab("Relative abundance sum (mean +/- SEM)") + theme(legend.position="none", text=element_text(size=12)) + scale_colour_manual(name="Gender identity", values=trans_cols, labels=c("Transmen", "Transwomen"))
+```
+
+```{r relAbs plots using pie charts}
+
+temp = relAbs_tongue %>%
+  as_tibble() %>%
+  mutate(subject=countData_tongue$subject,newTimepoint=countData_tongue$newTimepoint) %>%
+  pivot_longer(-c(subject,newTimepoint)) %>%
+  left_join(tongueSampleMeta %>% select(subject,newTimepoint,GenderID)) %>%
+  group_by(GenderID,newTimepoint,name) %>%
+  summarize(m=mean(value)) %>%
+  left_join(clusteredFeatures,by=c("name"="zOTU")) %>%
+  arrange(cluster, desc(m)) %>%
+  filter(GenderID == "TM") %>%
+  as.data.frame()
+
+temp[is.na(temp$cluster), "cluster"] = "Not clustered"
+
+# Identify "low abundance" genera per cluster
+threshold = 0.01
+temp = temp %>%
+  as_tibble() %>%
+  mutate(name = if_else(cluster == 1 & m < threshold, "Other", name)) %>%
+  mutate(name = if_else(cluster == 2 & m < threshold, "Other", name)) %>%
+  mutate(name = if_else(cluster == "Not clustered", "Other", name)) %>%
+  group_by(newTimepoint, name, cluster) %>%
+  summarize(m = sum(m), .groups = "drop")
+
+temp$col = NA
+temp[temp$cluster == 1, "col"] = "#F8766D"
+temp[temp$cluster == 2, "col"] = "#00BFC4"
+temp[temp$cluster == "Not clustered", "col"] = "gray"
+
+temp = temp %>%
+  as_tibble() %>%
+  arrange(cluster,m) %>%
+  left_join(clusteredFeatures %>% select(zOTU, Genus, Species), by=c("name"="zOTU")) %>%
+  mutate(Genus = gsub("g__", "", Genus), Species = gsub("s__", "", Species)) %>%
+  mutate(Species = gsub("\\(", "", Species)) %>%
+  mutate(Species = gsub("\\)", "", Species))
+
+temp[is.na(temp$Species), "Species"] = "Unknown"
+temp[temp$Species == "", "Species"] = "sp."
+temp$microbe = paste0(temp$Genus, " ", temp$Species)
+temp[temp$name == "Other", "microbe"] = "Other"
+temp[temp$col == "gray", "microbe"] = "Not clustered"
+
+temp[temp$microbe == "Streptococcus australis/parasanguinis_I/parasanguinis_II/sp._oral_taxon_057/sp._oral_taxon_066", "microbe"] = "Streptococcus australis/parasanguinis/sp."
+
+temp %>% ggplot(aes(x=as.factor(newTimepoint),y=m,fill=as.factor(microbe))) + facet_wrap(vars(cluster))+ geom_bar(stat="identity", col="black")
+
+# temp0 = temp %>% filter(newTimepoint == 0) %>% arrange(cluster,m)
+# temp3 = temp %>% filter(newTimepoint == 3) %>% arrange(cluster,m)
+# temp6 = temp %>% filter(newTimepoint == 6) %>% arrange(cluster,m)
+# temp12 = temp %>% filter(newTimepoint == 12) %>% arrange(cluster,m)
+# 
+# pie(temp0$m,col=temp0$col,labels=temp0$microbe, init.angle=90)
+# pie(temp3$m,col=temp3$col,labels=temp3$microbe, init.angle=90)
+# pie(temp6$m,col=temp6$col,labels=temp6$microbe, init.angle=90)
+# pie(temp12$m,col=temp12$col,labels=temp12$microbe, init.angle=90)
+# 
+# temp0 %>%
+#   ggplot(aes(x="",y=m, fill=as.factor(cluster))) +
+#   geom_col(color=1) +
+#   coord_polar(theta="y", start=0) + 
+#   geom_text_repel(aes(y=m, label=microbe), position=position_stack(vjust=0.3)) +
+#   theme_void() + 
+#   theme(legend.position="none")
+# 
+# temp3 %>%
+#   ggplot(aes(x="",y=m, fill=as.factor(cluster))) +
+#   geom_col(color=1) +
+#   coord_polar(theta="y", start=0) + 
+#   geom_text_repel(aes(y=m, label=microbe), position=position_stack(vjust=0.3)) +
+#   theme_void() + 
+#   theme(legend.position="none")
+# 
+# temp6 %>%
+#   ggplot(aes(x="",y=m, fill=as.factor(cluster))) +
+#   geom_col(color=1) +
+#   coord_polar(theta="y", start=0) + 
+#   geom_text_repel(aes(y=m, label=microbe), position=position_stack(vjust=0.3)) +
+#   theme_void() + 
+#   theme(legend.position="none")
+# 
+# temp12 %>%
+#   ggplot(aes(x="",y=m, fill=as.factor(cluster))) +
+#   geom_col(color=1) +
+#   coord_polar(theta="y", start=0) + 
+#   geom_text_repel(aes(y=m, label=microbe), position=position_stack(vjust=0.3)) +
+#   theme_void() + 
+#   theme(legend.position="none")
+```
+```{r alternative solution - loading plot again}
+# Tongue feature loadings
+threshold = 0.059
+temp = tongue_full$model$B %>%
+  as_tibble() %>%
+  filter(abs(V1) >= threshold) %>%
+  arrange(V1) %>%
+  mutate(index=1:nrow(.)) %>%
+  mutate(Genus = gsub("g__", "", V9), Species = gsub("s__", "", V10)) %>%
+  mutate(Species = gsub("\\(", "", Species)) %>%
+  mutate(Species = gsub("\\)", "", Species))
+
+fixedSpeciesNames = str_split_fixed(temp$Species, "/", 5) %>% 
+  as_tibble() %>%
+  mutate(dplyr::across(.cols = everything(), .fns = ~ dplyr::if_else(stringr::str_detect(.x, "sp."), "", .x)))
+fixedSpeciesNames[fixedSpeciesNames$V1 == "", "V1"] = "sp."
+fixedSpeciesNames = fixedSpeciesNames %>% 
+  mutate(name=paste0(V1, "/", V2)) %>% 
+  mutate(name=gsub("/$", "", name)) %>% 
+  mutate(name=paste0(name, "/", V3)) %>% 
+  mutate(name=gsub("/$", "", name)) %>% 
+  mutate(name=paste0(name, "/", V4)) %>% 
+  mutate(name=gsub("/$", "", name)) %>% 
+  mutate(name=paste0(name, "/", V5)) %>% 
+  mutate(name=gsub("/$", "", name))
+
+temp$Species = fixedSpeciesNames$name
+temp$name = paste0(temp$Genus, " ", temp$Species)
+temp[temp$name == " sp.", "name"] = "Unclassified"
+temp[temp$name == " ", "name"] = "Unclassified"
+temp[temp$name == " sp.", "name"] = "Unclassified"
+
+temp %>% left_join(clusteredFeatures, by=c("V3"="zOTU")) %>% ggplot(aes(y=V1,x=as.factor(index),fill=as.factor(cluster))) + geom_bar(stat="identity") + scale_x_discrete(labels=temp$name) + xlab("Component_1") + ylab("") + theme(legend.position="na", text=element_text(size=12), axis.text.x = element_text(angle=45, hjust=1, face="italic", size=8))
+```
+
+```{r permutation testing tongue}
+featureClustering = clusteredFeatures %>% mutate(group = cluster) %>% select(-cluster)
+taxonomy = taxonomyTongue
+
+ASVgroupPermutationTest = function(countData, featureClustering, timepoint, groupNumber, numPermutations){
+  microbiome.numeric = countData %>% as_tibble() %>% filter(newTimepoint==timepoint)
+  microbiome.meta = microbiome.numeric %>% select(subject)
+  microbiome.numeric = microbiome.numeric %>% select(-colnames(tongueSampleMeta))
+  totalSums = rowSums(microbiome.numeric)
+  relativeAbundances = sweep(microbiome.numeric, 1, totalSums, FUN="/") %>% as_tibble() %>% mutate(subject = microbiome.meta$subject)
+  colnames(relativeAbundances) = c(taxonomy$zOTU, "subject")
+
+  df = relativeAbundances %>%
+    select(all_of(c(featureClustering$zOTU, "subject"))) %>%
+    pivot_longer(-subject) %>%
+    left_join(featureClustering, by=c("name"="zOTU")) %>%
+    group_by(subject, group) %>%
+    summarize(s=sum(value), .groups="drop") %>%
+    ungroup() %>%
+    left_join(tongueSampleMeta %>% select(subject,GenderID) %>% unique()) %>%
+    filter(group == groupNumber)
+
+  dfA = df %>% filter(GenderID=="TW") %>% select(s) %>% pull()
+  dfB = df %>% filter(GenderID=="TM") %>% select(s) %>% pull()
+  #realResult = wilcox.test(dfA, dfB)$p.value
+  realResult = mean(dfA) - mean(dfB)
+
+  # Permutations
+  set.seed(1)
+  permutedResults = 1:numPermutations
+  for(i in 1:numPermutations){
+    dfA = df %>% mutate(GenderID = sample(GenderID)) %>% filter(GenderID=="TW") %>% select(s) %>% pull()
+    dfB = df %>% mutate(GenderID = sample(GenderID)) %>% filter(GenderID=="TM") %>% select(s) %>% pull()
+    #permutedResults[i] = wilcox.test(dfA, dfB)$p.value
+    permutedResults[i] = mean(dfA) - mean(dfB)
+  }
+
+  Zscore = abs(realResult - mean(permutedResults)) / sd(permutedResults)
+
+  if (realResult < 0){
+    pvalue = sum(permutedResults <= realResult) / numPermutations
+  }
+  else{
+    pvalue = sum(permutedResults >= realResult) / numPermutations
+  }
+  
+  if(pvalue==0){
+    pvalue = 1/numPermutations
+  }
+
+
+  return(list(realResult, permutedResults, mean(permutedResults), median(permutedResults), sd(permutedResults), Zscore, pvalue))
+}
+
+uncorrectedP = rep(NA, 4*2)
+iterator = 1
+
+for(visit in 1:4){
+  for(cluster in 1:2){
+    timepoint = timepoints[visit]
+    uncorrectedP[iterator] = ASVgroupPermutationTest(countData_tongue, featureClustering, timepoint=timepoints[visit], groupNumber=cluster, 999)[[7]]
+    iterator = iterator + 1
+  }
+}
+
+correctedP = p.adjust(uncorrectedP, "BH")
+
+matrix(uncorrectedP, nrow=2, ncol=4)
+matrix(correctedP, nrow=2, ncol=4)
+```
+
+# Clustering the saliva result for Figure 4E
+
+```{r filter features for clustering}
+taxonomy = taxonomySaliva
+saliva = saliva_full
+
+# Lazy solution to getting a long matrix
+I = nrow(saliva$dataset$mode1)
+J = nrow(saliva$dataset$mode2)
+K = nrow(saliva$dataset$mode3)
+X_wide = saliva$dataset$data
+X_long = X_wide[,1:J]
+Xhat_wide = saliva$reconstructedData
+Xhat_long = Xhat_wide[,1:J]
+X_cube = array(0L, dim=c(I,J,K))
+
+for(k in 1:(K-1)){
+  indexStart = k*J+1
+  indexEnd = (k+1)*J
+  
+  attachment = X_wide[,indexStart:indexEnd]
+  otherAttachment = Xhat_wide[,indexStart:indexEnd]
+  
+  colnames(attachment) = colnames(X_long) # silly thing to make rbind not complain
+  colnames(otherAttachment) = colnames(X_long) # silly thing to make rbind not complain
+  
+  X_long = rbind(X_long, attachment)
+  Xhat_long = rbind(Xhat_long, otherAttachment)
+  print(dim(attachment))
+  X_cube[,,k] = as.matrix(attachment)
+}
+X_cube[,,K] = as.matrix(X_wide[,781:ncol(X_wide)])
+
+
+# Determine variance explained
+featuresVarExp = 1:dim(Xhat_long)[2]
+modelVarExp = round(multiway::sumsq(saliva$reconstructedData) / multiway::sumsq(saliva$dataset$data, na.rm=TRUE) * 100,2)
+
+for(i in 1:dim(Xhat_long)[2]){
+  featuresVarExp[i] = multiway::sumsq(Xhat_long[,i], na.rm=TRUE) / multiway::sumsq(X_long[,i], na.rm=TRUE)
+}
+
+# Determine congruence
+salivaFac = list(saliva$model$A[,1], saliva$model$B[,1], saliva$model$C[,1])
+featureCongruences = conLoad(X_cube, salivaFac, 2, 1)
+
+# Establish feature mask
+varExpThreshold = modelVarExp / 100
+congruenceThreshold = 0.5
+featureMask = (featuresVarExp >= varExpThreshold) | (rowSums(featureCongruences>=congruenceThreshold) >= 1)
+```
+
+```{r cluster features based on modelled data}
+library(cluster)
+library(factoextra)
+library(scales)
+
+Xhat_filtered_long = Xhat_long[,featureMask]
+
+# Clustering diagnostics
+a = fviz_nbclust(t(Xhat_filtered_long), pam, method="wss")
+b = fviz_nbclust(t(Xhat_filtered_long), pam, method="silhouette")
+c = fviz_nbclust(t(Xhat_filtered_long), pam, method="gap_stat")
+ggarrange(a,b,c, nrow=3)
+
+# Cluster
+set.seed(1)
+numClusters = 2
+clusteringResult = pam(t(Xhat_filtered_long), numClusters, nstart=50)
+result = saliva$dataset$mode2[featureMask,] %>% as_tibble() %>% mutate(cluster=clusteringResult$clustering)
+
+clusteredFeatures = cbind(transformPARAFACloadings(salivaFac, 2), saliva$dataset$mode2) %>% as_tibble() %>% left_join(result) %>% mutate(V1 = as.numeric(V1))
+colnames(clusteredFeatures) = c("transformedLoadings", colnames(clusteredFeatures[2:11]))
+clusteredFeatures %>% ggplot(aes(x=transformedLoadings,y=0,col=as.factor(cluster))) + geom_point() + xlab("Feature mode, component 1 (transformed)") + ylab("Feature mode, component 2 (transformed)") + scale_color_manual(name = "Cluster", labels=c("1","2","Not clustered"), values=hue_pal()(2)) + theme(legend.position="bottom",text=element_text(size=14))
+
+# Alternative cluster loadings plots
+temp = clusteredFeatures %>% arrange(transformedLoadings) %>% mutate(index=1:nrow(.), name=paste0(Genus, " ", Species)) %>% filter(cluster != "NA")
+temp %>% arrange(transformedLoadings) %>% mutate(index=1:nrow(.)) %>% ggplot(aes(y=as.factor(index),x=transformedLoadings,fill=as.factor(cluster))) + geom_bar(stat="identity") + scale_y_discrete(name="Microbiota", label=temp$name)
+```
+
+```{r relabs plots of clusters}
+countData_saliva = cbind(salivaDF,salivaSampleMeta)
+countData_saliva.numeric = countData_saliva %>% select(-colnames(salivaSampleMeta))
+relAbs_saliva = sweep(countData_saliva.numeric, 1, rowSums(countData_saliva.numeric), FUN="/")
+colnames(relAbs_saliva) = taxonomy$zOTU
+
+clusterStr = c("Cluster 1 - transfeminine enriched", "Cluster 2 - transmasculine enriched")
+
+relAbs_saliva %>% as_tibble() %>% mutate(subject=countData_saliva$subject,newTimepoint=countData_saliva$newTimepoint) %>% pivot_longer(-c(subject,newTimepoint)) %>% left_join(salivaSampleMeta %>% select(subject,newTimepoint,GenderID)) %>% left_join(clusteredFeatures,by=c("name"="zOTU")) %>% filter(cluster != "NA") %>% select(subject,newTimepoint,GenderID,name,value,cluster) %>% group_by(subject,newTimepoint,cluster) %>% summarize(s=sum(value)) %>% left_join(salivaSampleMeta %>% select(subject,newTimepoint,GenderID)) %>% ungroup() %>% filter(GenderID != "NA") %>% group_by(GenderID,newTimepoint,cluster) %>% summarize(m=mean(s,na.rm=TRUE),v=plotrix::std.error(s,na.rm=TRUE)) %>% ungroup() %>% mutate(cluster_str = clusterStr[cluster]) %>% filter(newTimepoint != 9) %>% ggplot(aes(x=as.factor(newTimepoint),y=m,col=as.factor(GenderID),group=as.factor(GenderID))) + facet_wrap(~cluster_str) + geom_line() + geom_errorbar(aes(ymax=m+v,ymin=m-v,width=.2)) + geom_point() + xlab("Time point [months]") + ylab("Relative abundance sum (mean +/- SEM)") + theme(legend.position="none", text=element_text(size=12)) + scale_colour_manual(name="Gender identity", values=trans_cols, labels=c("Transmen", "Transwomen"))
+```
+```{r alternative solution}
+
+# Saliva feature loadings
+threshold = 0.055
+
+temp = saliva_full$model$B %>%
+  as_tibble() %>%
+  filter(abs(V1) >= threshold) %>%
+  arrange(V1) %>%
+  mutate(index=1:nrow(.)) %>%
+  mutate(Genus = gsub("g__", "", V9), Species = gsub("s__", "", V10)) %>%
+  mutate(Species = gsub("\\(", "", Species)) %>%
+  mutate(Species = gsub("\\)", "", Species))
+
+fixedSpeciesNames = str_split_fixed(temp$Species, "/", 5) %>%
+  as_tibble() %>%
+  mutate(dplyr::across(.cols = everything(), .fns = ~ dplyr::if_else(stringr::str_detect(.x, "sp."), "", .x)))
+fixedSpeciesNames[fixedSpeciesNames$V1 == "", "V1"] = "sp."
+fixedSpeciesNames = fixedSpeciesNames %>%
+  mutate(name=paste0(V1, "/", V2)) %>%
+  mutate(name=gsub("/$", "", name)) %>%
+  mutate(name=paste0(name, "/", V3)) %>%
+  mutate(name=gsub("/$", "", name)) %>%
+  mutate(name=paste0(name, "/", V4)) %>%
+  mutate(name=gsub("/$", "", name)) %>%
+  mutate(name=paste0(name, "/", V5)) %>%
+  mutate(name=gsub("/$", "", name))
+
+temp$Species = fixedSpeciesNames$name
+temp$name = paste0(temp$Genus, " ", temp$Species)
+temp[temp$name == "sp.", "name"] = "Unclassified"
+temp[temp$name == " ", "name"] = "Unclassified"
+temp[temp$name == " sp.", "name"] = "Unclassified"
+# 
+# b = temp %>% ggplot(aes(x=V1,y=as.factor(index),fill=as.factor(V5))) +
+#   geom_bar(stat="identity") +
+#   scale_fill_manual(name="Phylum", values=phylum_cols, labels=c("Actinobacteria", "Bacteroidetes", "Firmicutes", "Fusobacteria", "Proteobacteria")) +
+#   scale_y_discrete(labels=temp$name) +
+#   xlab("Component 1") +
+#   ylab("") +
+#   theme(legend.position="na", text=element_text(size=12), axis.text.y = element_text(face="italic",size=8))
+
+temp %>% left_join(clusteredFeatures, by=c("V3"="zOTU")) %>% ggplot(aes(y=V1,x=as.factor(index),fill=as.factor(cluster))) + geom_bar(stat="identity") + scale_x_discrete(labels=temp$name) + xlab("Component_1") + ylab("") + theme(legend.position="na", text=element_text(size=12), axis.text.x = element_text(angle=45, hjust=1, face="italic", size=8))
+```
+
+```{r permutation testing of the relabs}
+featureClustering = clusteredFeatures %>% mutate(group = cluster) %>% select(-cluster)
+
+ASVgroupPermutationTest = function(countData, featureClustering, timepoint, groupNumber, numPermutations){
+  microbiome.numeric = countData %>% as_tibble() %>% filter(newTimepoint==timepoint)
+  microbiome.meta = microbiome.numeric %>% select(subject)
+  microbiome.numeric = microbiome.numeric %>% select(-colnames(salivaSampleMeta))
+  totalSums = rowSums(microbiome.numeric)
+  relativeAbundances = sweep(microbiome.numeric, 1, totalSums, FUN="/") %>% as_tibble() %>% mutate(subject = microbiome.meta$subject)
+  colnames(relativeAbundances) = c(taxonomy$zOTU, "subject")
+
+  df = relativeAbundances %>%
+    select(all_of(c(featureClustering$zOTU, "subject"))) %>%
+    pivot_longer(-subject) %>%
+    left_join(featureClustering, by=c("name"="zOTU")) %>%
+    group_by(subject, group) %>%
+    summarize(s=sum(value), .groups="drop") %>%
+    ungroup() %>%
+    left_join(salivaSampleMeta %>% select(subject,GenderID) %>% unique()) %>%
+    filter(group == groupNumber)
+
+  dfA = df %>% filter(GenderID=="TW") %>% select(s) %>% pull()
+  dfB = df %>% filter(GenderID=="TM") %>% select(s) %>% pull()
+  #realResult = wilcox.test(dfA, dfB)$p.value
+  realResult = mean(dfA) - mean(dfB)
+
+  # Permutations
+  set.seed(1)
+  permutedResults = 1:numPermutations
+  for(i in 1:numPermutations){
+    dfA = df %>% mutate(GenderID = sample(GenderID)) %>% filter(GenderID=="TW") %>% select(s) %>% pull()
+    dfB = df %>% mutate(GenderID = sample(GenderID)) %>% filter(GenderID=="TM") %>% select(s) %>% pull()
+    #permutedResults[i] = wilcox.test(dfA, dfB)$p.value
+    permutedResults[i] = mean(dfA) - mean(dfB)
+  }
+
+  Zscore = abs(realResult - mean(permutedResults)) / sd(permutedResults)
+
+  if (realResult < 0){
+    pvalue = sum(permutedResults <= realResult) / numPermutations
+  }
+  else{
+    pvalue = sum(permutedResults >= realResult) / numPermutations
+  }
+  
+  if(pvalue==0){
+    pvalue = 1/numPermutations
+  }
+
+  return(list(realResult, permutedResults, mean(permutedResults), median(permutedResults), sd(permutedResults), Zscore, pvalue))
+}
+
+uncorrectedP = rep(NA, 4*2)
+iterator = 1
+
+for(visit in 1:4){
+  for(cluster in 1:2){
+    timepoint = timepoints[visit]
+    uncorrectedP[iterator] = ASVgroupPermutationTest(countData_saliva, featureClustering, timepoint=timepoints[visit], groupNumber=cluster, 999)[[7]]
+    iterator = iterator + 1
+  }
+}
+
+correctedP = p.adjust(uncorrectedP, "BH")
+
+matrix(uncorrectedP, nrow=2, ncol=4)
+matrix(correctedP, nrow=2, ncol=4)
+```
+
+# Supplementary Figures
+
+# Supplementary Tables
+```{r Supplementary Table Sx -  test metadata}
+testosterone0 = tongueSampleMeta %>% filter(newTimepoint==0) %>% select(subject, Testosterone_nmol_L) %>% arrange(subject)
+testosterone3 = tongueSampleMeta %>% filter(newTimepoint==3) %>% select(subject, Testosterone_nmol_L) %>% arrange(subject)
+deltaTestosterone = testosterone0 %>% inner_join(testosterone3, by="subject") %>% mutate(deltaTestosterone = Testosterone_nmol_L.y - Testosterone_nmol_L.x) %>% select(subject, deltaTestosterone)
+
+estradiol0 = tongueSampleMeta %>% filter(newTimepoint==0) %>% select(subject, Estradiol_pmol_ml) %>% arrange(subject)
+estradiol3 = tongueSampleMeta %>% filter(newTimepoint==3) %>% select(subject, Estradiol_pmol_ml) %>% arrange(subject)
+deltaEstradiol = estradiol0 %>% inner_join(estradiol3,by="subject") %>% mutate(deltaEstradiol = Estradiol_pmol_ml.y - Estradiol_pmol_ml.x) %>% select(subject, deltaEstradiol)
+
+metadataTest = function(model, metadata, numComponents=1, timepoints=c(0,3,6,12)){
+  normalSubjectLoadings = cbind(model$model$A[,1:numComponents], model$dataset$mode1) %>% as_tibble() %>% mutate(subject = as.numeric(subject)) %>% left_join(metadata %>% select(subject, GenderID, Age) %>% unique()) %>% left_join(deltaTestosterone) %>% left_join(deltaEstradiol)
+
+  Fac = list(model$model$A[,1:numComponents], model$model$B[,1:numComponents], model$model$C[,1:numComponents])
+  transformedSubjectLoadings = parafac4microbiome::transformPARAFACloadings(Fac, 2, moreOutput=TRUE)$Ftilde %>% as_tibble() %>% mutate(subject = rep(model$dataset$mode1[,1], each=length(timepoints)), newTimepoint = rep(timepoints, nrow(model$model$A))) %>% mutate(subject = as.numeric(subject)) %>% left_join(metadata) %>% left_join(otherMeta)
+  
+  uncorrectedP = matrix(NA, nrow=numComponents, ncol=12)
+
+  for(i in 1:numComponents){
+
+    # GenderID
+    if(length(unique(normalSubjectLoadings$GenderID)) == 2){
+      uncorrectedP[i,1] = wilcox.test(normalSubjectLoadings %>% filter(GenderID=="TM") %>% select(V1) %>% pull() %>% as.numeric(), normalSubjectLoadings %>% filter(GenderID=="TW") %>% select(V1) %>% pull() %>% as.numeric())$p.value
+    }
+    
+    # Age
+    uncorrectedP[i,2] = cor.test(normalSubjectLoadings[,i] %>% pull() %>% as.numeric(), normalSubjectLoadings$Age)$p.value
+
+      # Estradiol
+    uncorrectedP[i,3] = cor.test(normalSubjectLoadings[,i] %>% pull() %>% as.numeric(), normalSubjectLoadings$deltaEstradiol)$p.value
+
+    # Testosterone
+    uncorrectedP[i,4] = cor.test(normalSubjectLoadings[,i] %>% pull() %>% as.numeric(), normalSubjectLoadings$deltaTestosterone)$p.value
+
+    # MUC5B
+    uncorrectedP[i,5] = cor.test(transformedSubjectLoadings[,i] %>% pull(), transformedSubjectLoadings$MUC_5_B_ug_ml)$p.value
+    
+    # Chitinase
+    uncorrectedP[i,6] = cor.test(transformedSubjectLoadings[,i] %>% pull(), transformedSubjectLoadings$Chitinase_AU_ml)$p.value
+    
+    # S-igA
+    uncorrectedP[i,7] = cor.test(transformedSubjectLoadings[,i] %>% pull(), transformedSubjectLoadings$S_IgA_ug_ml)$p.value
+    
+    # Lysozyme
+    uncorrectedP[i,8] = cor.test(transformedSubjectLoadings[,i] %>% pull(), transformedSubjectLoadings$Lysozyme_U_ml)$p.value
+    
+    # Amylase
+    uncorrectedP[i,9] = cor.test(transformedSubjectLoadings[,i] %>% pull(), transformedSubjectLoadings$Amylase_U_ml)$p.value
+    
+    # Total protein
+    uncorrectedP[i,10] = cor.test(transformedSubjectLoadings[,i] %>% pull(), transformedSubjectLoadings$Total_protein_ug_ml)$p.value
+    
+    # BOP%
+    uncorrectedP[i,11] = cor.test(transformedSubjectLoadings[,i] %>% pull(), transformedSubjectLoadings$boppercent)$p.value
+    
+    # pH
+    uncorrectedP[i,12] = cor.test(transformedSubjectLoadings[,i] %>% pull(), transformedSubjectLoadings$pH)$p.value
+  }
+  
+  correctedP = matrix(p.adjust(uncorrectedP, "BH"), nrow=numComponents, ncol=12)
+  return(correctedP)
+}
+
+tongue1 = metadataTest(tongue_full, tongueSampleMeta, 1)
+tongue2 = metadataTest(tongue_TM, tongueSampleMeta, 2)
+tongue3 = metadataTest(tongue_TW, tongueSampleMeta, 1)
+
+saliva1 = metadataTest(saliva_full, salivaSampleMeta, 1)
+saliva2 = metadataTest(saliva_TM, salivaSampleMeta, 1)
+saliva3 = metadataTest(saliva_TW, salivaSampleMeta, 1)
+
+cytokine1 = metadataTest(cytokines_full, salivaSampleMeta, 1, timepoints=c(0,3,12))
+cytokine2 = metadataTest(cytokines_TM, salivaSampleMeta, 1, timepoints=c(0,3,12))
+cytokine3 = metadataTest(cytokines_TW, salivaSampleMeta, 1, timepoints=c(0,3,12))
+```

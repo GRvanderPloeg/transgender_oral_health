@@ -1,0 +1,5 @@
+  Percent Variation Captured by N-PLS Model   
+  
+   LV      X-Block    Y-Block
+   ----    -------    -------
+     1       6.61      66.90
