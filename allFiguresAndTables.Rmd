@@ -1335,15 +1335,29 @@ ggarrange(g,h,i,nrow=1)
 ```{r double check associations}
 
 # Full models - no RMSE check
+
+## Tongue
 ypred_tongue = read.csv("./20241212_Tongue_UNOISE_combined_binary/Tongue_1_ypred.csv", header=FALSE) %>% as_tibble()
 Xhat_tongue_full = parafac4microbiome::reinflateTensor(tongue_full$model$A[,1], tongue_full$model$B[,1], tongue_full$model$C[,1])
 tongue_cor = cor(Xhat_tongue_full[,,1], ypred_tongue[,ncol(ypred_tongue)]) %>% as_tibble() %>% mutate(cor = V4) %>% select(-V4)
 # cbind(tongue_full$model$B, tongue_cor) %>% as_tibble() %>% arrange(desc(V1)) %>% View
 
+temp=as.numeric(as.factor(tongue_full$dataset$mode1[,2]))
+roc(temp, ypred_tongue$V1)
+
+## Saliva
 ypred_saliva = read.csv("./20241212_Saliva_UNOISE_combined_binary/Saliva_1_ypred.csv", header=FALSE) %>% as_tibble()
 Xhat_saliva_full = parafac4microbiome::reinflateTensor(saliva_full$model$A[,1], saliva_full$model$B[,1], saliva_full$model$C[,1])
 saliva_cor = cor(Xhat_saliva_full[,,1], ypred_saliva[,ncol(ypred_saliva)]) %>% as_tibble() %>% mutate(cor = V4) %>% select(-V4)
 cbind(saliva_full$model$B, saliva_cor) %>% as_tibble() %>% arrange(desc(V1)) %>% View
+
+temp=as.numeric(as.factor(saliva_full$dataset$mode1[,2]))
+roc(temp, ypred_saliva$V1)
+
+## Cytokine full
+ypred_cytokines = read.csv("./20241212_Cytokines_combined_binary/Cytokine_1_ypred.csv", header=FALSE) %>% as_tibble()
+temp=as.numeric(as.factor(cytokines_full$dataset$mode1[,2]))
+roc(temp, ypred_cytokines$V1)
 
 # TM models
 ypred_tongue = read.csv("./20241212_Tongue_UNOISE_TM_2comp//Tongue_2_ypred.csv", header=FALSE) %>% as_tibble()
